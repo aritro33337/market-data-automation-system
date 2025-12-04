@@ -1,0 +1,41 @@
+{
+    "app_name": "Market Data Automation System",
+    "version": "1.0.0",
+    "environment": "development",
+
+    "api": {
+        "provider": "alpha_vantage",
+        "timeout_seconds": 10
+    },
+
+    "data_sources": {
+        "symbols": ["AAPL", "BTC-USD"],
+        "fallback_symbols": ["MSFT"],
+        "default_interval_seconds": 60,
+        "save_raw_data": true,
+        "max_retry": 3,
+        "retry_delay_seconds": 2
+    },
+
+    "export": {
+        "excel_output_folder": "data/exports/",
+        "excel_file_prefix": "market_data_",
+        "include_timestamp_in_filename": true
+    },
+
+    "scheduler": {
+        "enabled": true,
+        "interval_seconds": 60
+    },
+
+    "logging": {
+        "level": "INFO",
+        "log_file": "logs/app.log"
+    },
+
+    "ml": {
+        "inference_enabled": false,
+        "model_path": "ml/models/latest_model.pkl",
+        "feature_config_path": "ml/features/feature_config.json"
+    }
+}
