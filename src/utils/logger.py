@@ -15,7 +15,6 @@ from datetime import datetime
 from typing import Dict, Optional, Any, Union, Callable
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
-from .config_loader import ConfigLoader
 
 __all__ = [
     "get_logger", 
@@ -274,13 +273,16 @@ class Logger:
             self._setup_logging_infrastructure()
             self._setup_global_exception_handler()
             self._setup_signal_handlers()
-            self._start_config_watcher()
+            # DISABLED: Causes freeze on Python 3.13
+            # self._start_config_watcher()
             self._setup_external_observability()
             self._initialized = True
+            time.sleep(0.01)  # Allow threads to initialize safely
 
     def _reload_config(self):
         with self._config_lock:
             try:
+                from .config_loader import ConfigLoader
                 config = ConfigLoader.load_config(self._config_path)
                 if not config:
                     config = {}
@@ -457,16 +459,20 @@ class Logger:
             self._file_handler,
             self._error_handler,
             self._metrics_handler,
-            self._console_handler,
             respect_handler_level=True
         )
-        self._listener.start()
         
-        try:
-            if hasattr(self._listener, '_thread'):
-                self._listener._thread.daemon = True
-        except Exception:
-            pass
+        # Start listener in a safer way with timeout protection
+        def _safe_start_listener():
+            try:
+                # Set a short timeout to prevent hanging
+                self._listener.start()
+            except Exception as e:
+                print(f"[Logger] Warning: QueueListener failed to start: {e}", file=sys.stderr)
+
+        listener_thread = threading.Thread(target=_safe_start_listener, daemon=True, name="QueueListenerThread")
+        listener_thread.daemon = True
+        listener_thread.start()
 
     def _setup_global_exception_handler(self):
         def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
@@ -526,6 +532,7 @@ class Logger:
             if not logger.handlers:
                 handler = self._create_enhanced_handler()
                 logger.addHandler(handler)
+                logger.addHandler(self._console_handler)
 
             self._loggers[module_name] = logger
             return logger
@@ -650,13 +657,21 @@ class Logger:
             self._error_reporter = None
 
 _logger_manager_instance: Optional[Logger] = None
-_logger_manager_lock = threading.Lock()
+_logger_manager_lock = threading.RLock()  # Use RLock to allow re-entrant locking
+_is_initializing = False  # Flag to prevent recursion during init
 
 def get_logger(module_name: str) -> logging.Logger:
-    global _logger_manager_instance
+    global _logger_manager_instance, _is_initializing
     with _logger_manager_lock:
         if _logger_manager_instance is None:
-            _logger_manager_instance = Logger()
+            if _is_initializing:
+                # During initialization, return a basic logger to prevent recursion
+                return logging.getLogger(module_name)
+            _is_initializing = True
+            try:
+                _logger_manager_instance = Logger()
+            finally:
+                _is_initializing = False
         return _logger_manager_instance.get_logger(module_name)
 
 def update_log_level(new_level: str) -> None:
