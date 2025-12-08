@@ -2,40 +2,52 @@
     "app_name": "Market Data Automation System",
     "version": "1.0.0",
     "environment": "development",
-
     "api": {
         "provider": "alpha_vantage",
-        "timeout_seconds": 10
+        "timeout_seconds": 10,
+        "rate_limit_delay": 0.5
     },
-
     "data_sources": {
-        "symbols": ["AAPL", "BTC-USD"],
-        "fallback_symbols": ["MSFT"],
+        "symbols": [
+            "AAPL",
+            "BTC-USD"
+        ],
+        "fallback_symbols": [
+            "MSFT"
+        ],
         "default_interval_seconds": 60,
         "save_raw_data": true,
         "max_retry": 3,
-        "retry_delay_seconds": 2
+        "retry_delay_seconds": 2,
+        "raw_data_path": "data/raw/",
+        "processed_data_path": "data/processed/"
     },
-
     "export": {
         "excel_output_folder": "data/exports/",
         "excel_file_prefix": "market_data_",
         "include_timestamp_in_filename": true
     },
-
     "scheduler": {
         "enabled": true,
         "interval_seconds": 60
     },
-
     "logging": {
         "level": "INFO",
-        "log_file": "logs/app.log"
+        "log_dir": "logs/",
+        "app_log": "app.log",
+        "error_log": "error.log",
+        "metrics_log": "metrics.log",
+        "use_color": true,
+        "use_json": false
     },
-
     "ml": {
         "inference_enabled": false,
         "model_path": "ml/models/latest_model.pkl",
         "feature_config_path": "ml/features/feature_config.json"
+    },
+    "crypto_features": {
+        "fetch_klines": true,
+        "fetch_trades": false,
+        "fetch_orderbook": false
     }
 }
