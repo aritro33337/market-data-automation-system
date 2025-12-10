@@ -30,82 +30,68 @@ class ExcelExporter:
         self.logger = get_logger("ExcelExporter")
         self.export_dir = Path(export_dir)
         self.lock = threading.RLock()
-        
+        self.template_path = None
+        self.append_mode = False
+
         try:
             self.currency = CurrencySymbol[currency.upper()].value
         except (KeyError, AttributeError):
             self.currency = "$"
             self.logger.warning(f"Unknown currency '{currency}', defaulting to USD")
-        
+
         self.header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
         self.header_font = Font(bold=True, color="FFFFFF", size=11, name="Calibri")
-        
+
         self.dark_blue_fill = PatternFill(start_color="D9E8F5", end_color="D9E8F5", fill_type="solid")
+        self.light_fill = PatternFill(start_color="E7F0F9", end_color="E7F0F9", fill_type="solid")
         self.white_fill = PatternFill(fill_type=None)
-        
+
         self.data_font = Font(size=10, name="Calibri", color="000000")
+        self.header_font_alt = Font(size=9, name="Calibri", color="666666")
+
         self.center_align = Alignment(horizontal="center", vertical="center", wrap_text=False)
         self.left_align = Alignment(horizontal="left", vertical="center", wrap_text=False)
         self.right_align = Alignment(horizontal="right", vertical="center", wrap_text=False)
-        
+
         self.thin_border = Side(border_style="thin", color="404040")
         self.thin_border_light = Side(border_style="thin", color="D3D3D3")
 
         try:
             self._ensure_export_directory()
-            self.logger.info(f"ExcelExporter initialized (export_dir={str(self.export_dir)}, currency={self.currency})")
-            log_metric("excel_exporter_init", 1, {"export_dir": str(self.export_dir), "currency": currency})
+            self.logger.info(
+                f"ExcelExporter initialized (export_dir={str(self.export_dir)}, "
+                f"currency={self.currency}, append_mode={self.append_mode})"
+            )
+            log_metric(
+                "excel_exporter_init",
+                1,
+                {
+                    "export_dir": str(self.export_dir),
+                    "currency": currency,
+                    "append_mode": self.append_mode,
+                },
+            )
         except Exception as e:
             self.logger.error(f"Failed to initialize ExcelExporter: {str(e)}")
             log_metric("excel_exporter_init", 0, {"error": str(e)})
             raise
 
-    def _format_number(self, value: Any, decimals: int = 2) -> str:
+    def set_template(self, template_path: str) -> bool:
         try:
-            if value is None:
-                return ""
-            num_val = float(value)
-            if abs(num_val) > 1000000:
-                return f"{num_val:.{max(0, decimals-2)}e}"
-            return f"{num_val:.{max(0, decimals)}f}"
-        except (ValueError, TypeError, AttributeError):
-            return str(value) if value else ""
+            path = Path(template_path)
+            if not path.exists():
+                self.logger.warning(f"Template file not found: {template_path}")
+                return False
+            self.template_path = template_path
+            self.logger.info(f"Template set: {template_path}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error setting template: {str(e)}")
+            return False
 
-    def _split_timestamp(self, timestamp: str) -> Tuple[str, str]:
-        try:
-            if not timestamp or not isinstance(timestamp, str):
-                return "", ""
-            
-            if "T" in timestamp:
-                date_part, time_part = timestamp.split("T", 1)
-                time_clean = time_part.replace("Z", "").split(".")[0]
-                return date_part, time_clean
-            elif " " in timestamp:
-                parts = timestamp.split(" ", 1)
-                date_part = parts[0]
-                time_clean = parts[1].split(".")[0] if len(parts) > 1 else ""
-                return date_part, time_clean
-            else:
-                return timestamp, ""
-        except (ValueError, AttributeError, IndexError):
-            return timestamp, ""
-
-    def _format_price(self, value: Any, asset_type: str = "stock") -> str:
-        try:
-            if value is None or value == "":
-                return ""
-            
-            num_val = float(value)
-            
-            if asset_type and asset_type.lower() == "crypto":
-                if num_val >= 1000:
-                    return f"{self.currency} {num_val:,.2f}"
-                else:
-                    return f"{self.currency} {num_val:.4f}"
-            else:
-                return f"{self.currency} {num_val:.2f}"
-        except (ValueError, TypeError, AttributeError):
-            return str(value) if value else ""
+    def enable_append_mode(self, enable: bool = True) -> None:
+        self.append_mode = enable
+        self.logger.info(f"Append mode: {enable}")
 
     def _ensure_export_directory(self) -> None:
         try:
@@ -113,6 +99,114 @@ class ExcelExporter:
         except (OSError, PermissionError) as e:
             self.logger.error(f"Failed to create export directory: {str(e)}")
             raise
+
+    def _apply_number_formatting(self, ws: Any, df: pd.DataFrame) -> None:
+        try:
+            if ws.max_row < 2:
+                return
+
+            for col_idx, col in enumerate(df.columns, 1):
+                col_letter = ws.cell(row=1, column=col_idx).column_letter
+
+                if any(keyword in str(col).lower() for keyword in ["price", "cost", "amount", "value"]):
+                    for row_idx in range(2, ws.max_row + 1):
+                        try:
+                            cell = ws[f"{col_letter}{row_idx}"]
+                            cell.number_format = f"{self.currency} #,##0.00"
+                        except Exception:
+                            pass
+
+                elif any(keyword in str(col).lower() for keyword in ["volume", "count"]):
+                    for row_idx in range(2, ws.max_row + 1):
+                        try:
+                            cell = ws[f"{col_letter}{row_idx}"]
+                            cell.number_format = "#,##0"
+                        except Exception:
+                            pass
+
+                elif any(keyword in str(col).lower() for keyword in ["percent", "change", "ratio"]):
+                    for row_idx in range(2, ws.max_row + 1):
+                        try:
+                            cell = ws[f"{col_letter}{row_idx}"]
+                            cell.number_format = "0.00%"
+                        except Exception:
+                            pass
+
+        except Exception as e:
+            self.logger.debug(f"Error applying number formatting: {str(e)}")
+
+    def _apply_conditional_formatting(self, ws: Any) -> None:
+        try:
+            if ws.max_row < 2:
+                return
+
+            from openpyxl.formatting.rule import CellIsRule
+
+            green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+            red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+            for col_idx in range(1, ws.max_column + 1):
+                col_letter = ws.cell(row=1, column=col_idx).column_letter
+
+                try:
+                    col_header = str(ws[f"{col_letter}1"].value or "").lower()
+                    if any(k in col_header for k in ["change", "return", "gain"]):
+                        green_rule = CellIsRule(operator="greaterThan", formula=["0"], fill=green_fill)
+                        red_rule = CellIsRule(operator="lessThan", formula=["0"], fill=red_fill)
+
+                        range_str = f"{col_letter}2:{col_letter}{ws.max_row}"
+                        ws.conditional_formatting.add(range_str, green_rule)
+                        ws.conditional_formatting.add(range_str, red_rule)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            self.logger.debug(f"Error applying conditional formatting: {str(e)}")
+
+    def _apply_data_validation(self, ws: Any, df: pd.DataFrame) -> None:
+        try:
+            if ws.max_row < 2:
+                return
+
+            from openpyxl.worksheet.datavalidation import DataValidation
+
+            for col_idx, col in enumerate(df.columns, 1):
+                col_letter = ws.cell(row=1, column=col_idx).column_letter
+
+                if any(k in str(col).lower() for k in ["type", "asset", "category"]):
+                    dv = DataValidation(
+                        type="list",
+                        formula1='"stock,crypto,bond,commodity,forex"',
+                        allow_blank=True
+                    )
+                    dv.error = "Select from list"
+                    dv.errorTitle = "Invalid Entry"
+                    ws.add_data_validation(dv)
+                    dv.add(f"{col_letter}2:{col_letter}{ws.max_row}")
+
+        except Exception as e:
+            self.logger.debug(f"Error applying data validation: {str(e)}")
+
+    def _apply_freeze_panes(self, ws: Any) -> None:
+        try:
+            ws.freeze_panes = "A2"
+        except Exception as e:
+            self.logger.debug(f"Error applying freeze panes: {str(e)}")
+
+    def _apply_print_settings(self, ws: Any) -> None:
+        try:
+            ws.page_setup.orientation = "landscape"
+            ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+            ws.page_margins.left = 0.5
+            ws.page_margins.right = 0.5
+            ws.page_margins.top = 0.75
+            ws.page_margins.bottom = 0.75
+
+            ws.print_options.horizontalCentered = False
+            ws.print_title_rows = "1:1"
+
+        except Exception as e:
+            self.logger.debug(f"Error applying print settings: {str(e)}")
 
     def _to_dataframe(self, data: Any) -> pd.DataFrame:
         try:
@@ -365,13 +459,18 @@ class ExcelExporter:
         except (ValueError, TypeError, AttributeError) as e:
             self.logger.error(f"Error applying auto column width: {str(e)}")
 
-    def _apply_enterprise_styling(self, ws: Any) -> None:
+    def _apply_enterprise_styling(self, ws: Any, df: pd.DataFrame) -> None:
         try:
             self._apply_header_style(ws)
             self._apply_row_colors(ws)
             self._apply_thin_borders(ws)
             self._auto_column_width(ws)
             self._set_row_height(ws)
+            self._apply_number_formatting(ws, df)
+            self._apply_conditional_formatting(ws)
+            self._apply_data_validation(ws, df)
+            self._apply_freeze_panes(ws)
+            self._apply_print_settings(ws)
         except (ValueError, TypeError, AttributeError) as e:
             self.logger.error(f"Error applying enterprise styling: {str(e)}")
 
@@ -462,16 +561,20 @@ class ExcelExporter:
                     log_metric("excel_export_no_rows", 0, {})
                     return None
 
-                self._apply_enterprise_styling(ws)
+                self._apply_enterprise_styling(ws, df)
 
                 filepath = self._save(wb, filename_prefix)
 
                 if filepath:
-                    log_metric("excel_export_success", 1, {
-                        "filename_prefix": filename_prefix,
-                        "rows": row_count,
-                        "columns": df.shape[1]
-                    })
+                    log_metric(
+                        "excel_export_success",
+                        1,
+                        {
+                            "filename_prefix": filename_prefix,
+                            "rows": row_count,
+                            "columns": df.shape[1],
+                        },
+                    )
 
                 return filepath
 
@@ -521,7 +624,7 @@ class ExcelExporter:
                         row_count = self._write_dataframe_to_sheet(df, ws)
 
                         if row_count > 0:
-                            self._apply_enterprise_styling(ws)
+                            self._apply_enterprise_styling(ws, df)
                             sheet_count += 1
                             total_rows += row_count
                         else:

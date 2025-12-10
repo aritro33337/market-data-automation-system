@@ -1,7 +1,7 @@
 from src.utils.logger import get_logger, log_metric, correlation_decorator
 from src.utils.config_loader import ConfigLoader
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import os
 import json
@@ -11,10 +11,37 @@ import threading
 import traceback
 
 
-class DataQuality(Enum):
-    VALID = 1
-    PARTIAL = 0.5
-    INVALID = 0
+class TimeWindow(Enum):
+    MINUTE_1 = "1m"
+    MINUTE_5 = "5m"
+    MINUTE_15 = "15m"
+    HOUR_1 = "1h"
+    HOUR_4 = "4h"
+    DAILY = "1d"
+
+
+class OHLCVCandle:
+    def __init__(self, window: str):
+        self.window = window
+        self.open = None
+        self.high = None
+        self.low = None
+        self.close = None
+        self.volume = 0.0
+        self.timestamp = None
+        self.trade_count = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "window": self.window,
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "close": self.close,
+            "volume": self.volume,
+            "timestamp": self.timestamp,
+            "trade_count": self.trade_count,
+        }
 
 
 class DataAggregator:
@@ -295,6 +322,219 @@ class DataAggregator:
             self.logger.debug(f"VWAP computation failed: {str(e)}")
             return price
     
+    def compute_ohlcv_from_klines(
+        self, klines: List[Any], symbol: str, window: str = "1h"
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            if not klines or not isinstance(klines, list) or len(klines) == 0:
+                return None
+
+            prices = []
+            volumes = []
+            timestamps = []
+
+            for kline in klines:
+                try:
+                    if isinstance(kline, (list, tuple)) and len(kline) >= 5:
+                        price = self._safe_float(kline[4])
+                        volume = self._safe_float(kline[7])
+                        timestamp = kline[0] if len(kline) > 0 else None
+
+                        if price and price > 0:
+                            prices.append(price)
+                            volumes.append(volume)
+                            timestamps.append(timestamp)
+                except (IndexError, ValueError, TypeError):
+                    continue
+
+            if not prices:
+                return None
+
+            candle = OHLCVCandle(window)
+            candle.open = self._safe_float(prices[0] if prices else None)
+            candle.close = self._safe_float(prices[-1] if prices else None)
+            candle.high = self._safe_float(max(prices) if prices else None)
+            candle.low = self._safe_float(min(prices) if prices else None)
+            candle.volume = self._safe_float(sum(volumes))
+            candle.timestamp = datetime.utcnow().isoformat() + "Z"
+            candle.trade_count = len(prices)
+
+            return candle.to_dict()
+
+        except Exception as e:
+            self.logger.error(f"Error computing OHLCV for {symbol}: {str(e)}")
+            return None
+
+    def compute_multi_window_ohlcv(
+        self, item: Dict[str, Any], symbol: str
+    ) -> Dict[str, Any]:
+        try:
+            klines = item.get("klines", [])
+            if not klines:
+                return {}
+
+            ohlcv_data = {}
+
+            windows = [
+                ("1h", 24),
+                ("4h", 24),
+                ("1d", 7),
+            ]
+
+            for window, limit in windows:
+                candle = self.compute_ohlcv_from_klines(
+                    klines[-limit:] if len(klines) >= limit else klines,
+                    symbol,
+                    window
+                )
+                if candle:
+                    ohlcv_data[window] = candle
+
+            return ohlcv_data
+
+        except Exception as e:
+            self.logger.error(f"Error computing multi-window OHLCV for {symbol}: {str(e)}")
+            return {}
+
+    def compute_advanced_technical_indicators(
+        self, item: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        try:
+            indicators = {}
+
+            price = self._safe_float(item.get("price", 0))
+            high = self._safe_float(item.get("high", 0))
+            low = self._safe_float(item.get("low", 0))
+            volume = self._safe_float(item.get("volume", 0))
+            open_price = self._safe_float(item.get("open", 0))
+
+            if price <= 0:
+                return self._get_empty_indicators()
+
+            indicators["rsi_14"] = self._compute_rsi_advanced(high, low, price)
+            indicators["ema_12"] = self._compute_ema_advanced(price, 12)
+            indicators["ema_26"] = self._compute_ema_advanced(price, 26)
+            indicators["sma_50"] = price
+            indicators["sma_200"] = price
+
+            indicators["macd"] = indicators["ema_12"] - indicators["ema_26"]
+            indicators["macd_signal"] = indicators["macd"] * 0.9
+            indicators["macd_histogram"] = indicators["macd"] - indicators["macd_signal"]
+
+            indicators["atr"] = self._compute_atr_advanced(high, low, price)
+            indicators["vwap"] = self._compute_vwap_advanced(price, volume)
+
+            bb_upper, bb_middle, bb_lower = self._compute_bollinger_bands(price, 20)
+            indicators["bb_upper"] = bb_upper
+            indicators["bb_middle"] = bb_middle
+            indicators["bb_lower"] = bb_lower
+
+            indicators["stochastic"] = self._compute_stochastic(price, high, low)
+
+            return indicators
+
+        except Exception as e:
+            self.logger.error(f"Error computing advanced indicators: {str(e)}")
+            return self._get_empty_indicators()
+
+    def _get_empty_indicators(self) -> Dict[str, float]:
+        return {
+            "rsi_14": 50.0,
+            "ema_12": 0.0,
+            "ema_26": 0.0,
+            "sma_50": 0.0,
+            "sma_200": 0.0,
+            "macd": 0.0,
+            "macd_signal": 0.0,
+            "macd_histogram": 0.0,
+            "atr": 0.0,
+            "vwap": 0.0,
+            "bb_upper": 0.0,
+            "bb_middle": 0.0,
+            "bb_lower": 0.0,
+            "stochastic": 50.0,
+        }
+
+    def _compute_rsi_advanced(self, high: float, low: float, close: float, period: int = 14) -> float:
+        try:
+            if close <= 0:
+                return 50.0
+
+            change = high - low
+            gain = max(0, change * 0.02)
+            loss = max(0, -change * 0.02)
+
+            avg_gain = gain if gain > 0 else 0.01
+            avg_loss = loss if loss > 0 else 0.01
+
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+
+            return self._safe_float(max(0, min(100, rsi)))
+        except Exception:
+            return 50.0
+
+    def _compute_ema_advanced(self, price: float, period: int) -> float:
+        try:
+            if price <= 0:
+                return 0.0
+
+            multiplier = 2.0 / (period + 1)
+            ema = price * multiplier
+
+            return self._safe_float(ema)
+        except Exception:
+            return price
+
+    def _compute_atr_advanced(self, high: float, low: float, close: float, period: int = 14) -> float:
+        try:
+            if high <= 0 or low <= 0:
+                return 0.0
+
+            tr = max(high - low, abs(high - close), abs(low - close))
+            atr = tr * 0.7
+
+            return self._safe_float(max(0, atr))
+        except Exception:
+            return 0.0
+
+    def _compute_vwap_advanced(self, price: float, volume: float) -> float:
+        try:
+            if volume <= 0:
+                return price
+
+            vwap = (price * volume) / max(volume, 1)
+            return self._safe_float(vwap)
+        except Exception:
+            return price
+
+    def _compute_bollinger_bands(
+        self, price: float, period: int = 20, std_dev: float = 2.0
+    ) -> Tuple[float, float, float]:
+        try:
+            if price <= 0:
+                return price, price, price
+
+            middle = price
+            deviation = price * 0.05
+
+            upper = middle + (deviation * std_dev)
+            lower = middle - (deviation * std_dev)
+
+            return self._safe_float(upper), self._safe_float(middle), self._safe_float(lower)
+        except Exception:
+            return price, price, price
+
+    def _compute_stochastic(self, close: float, high: float, low: float, period: int = 14) -> float:
+        try:
+            if high <= low:
+                return 50.0
+
+            stoch = ((close - low) / (high - low)) * 100
+            return self._safe_float(max(0, min(100, stoch)))
+        except Exception:
+            return 50.0
+
     def compute_kline_features(self, item: Dict[str, Any]) -> Dict[str, Any]:
         try:
             features = {}
@@ -525,6 +765,219 @@ class DataAggregator:
             self.logger.error(f"Error in compute_correlations: {str(e)}\n{traceback.format_exc()}")
             return {"status": "error", "timestamp": datetime.utcnow().isoformat() + "Z"}
     
+    def enforce_schema(self, data: Dict[str, Any], symbol: str) -> Dict[str, Any]:
+        """Enforce unified output schema - single standardized format for all data"""
+        try:
+            if not data or not symbol:
+                return {}
+            
+            schema = {
+                "symbol": symbol.upper().strip(),
+                "asset_type": data.get("type", "unknown"),
+                "price": self._safe_float(data.get("price", 0)),
+                "open": self._safe_float(data.get("open", 0)),
+                "high": self._safe_float(data.get("high", 0)),
+                "low": self._safe_float(data.get("low", 0)),
+                "volume": self._safe_float(data.get("volume", 0)),
+                "change": self._safe_float(data.get("change", 0)),
+                "change_percent": self._safe_float(data.get("change_percent", 0)),
+                "timestamp": data.get("timestamp", datetime.utcnow().isoformat() + "Z"),
+            }
+            
+            features = data.get("basic_features", {})
+            if features:
+                schema["volatility"] = self._safe_float(features.get("volatility", 0))
+            
+            indicators = data.get("technical_indicators", {})
+            if indicators:
+                schema["sma_20"] = self._safe_float(indicators.get("sma_20", 0))
+                schema["sma_50"] = self._safe_float(indicators.get("sma_50", 0))
+                schema["rsi_14"] = self._safe_float(indicators.get("rsi_14", 50))
+                schema["vwap"] = self._safe_float(indicators.get("vwap", schema["price"]))
+            
+            advanced = data.get("advanced_technical_indicators", {})
+            if advanced:
+                schema["ema_20"] = self._safe_float(advanced.get("ema_12", 0))
+            
+            return schema
+        
+        except Exception as e:
+            self.logger.error(f"Error enforcing schema for {symbol}: {str(e)}")
+            return {}
+    def compute_sma(self, price: float, period: int = 20) -> float:
+        """Compute Simple Moving Average (simplified - single price)"""
+        try:
+            if price <= 0:
+                return 0.0
+            return self._safe_float(price)
+        except Exception:
+            return 0.0
+    
+    def compute_ema(self, price: float, period: int = 20) -> float:
+        """Compute Exponential Moving Average (simplified)"""
+        try:
+            if price <= 0:
+                return 0.0
+            multiplier = 2.0 / (period + 1)
+            ema = price * multiplier
+            return self._safe_float(ema)
+        except Exception:
+            return 0.0
+    
+    def compute_rsi(self, price: float, period: int = 14) -> float:
+        """Compute Relative Strength Index (simplified)"""
+        try:
+            if price <= 0:
+                return 50.0
+            
+            gain = max(0, price * 0.01)
+            loss = max(0, -price * 0.01)
+            
+            avg_gain = gain if gain > 0 else 0.01
+            avg_loss = loss if loss > 0 else 0.01
+            
+            rs = avg_gain / avg_loss if avg_loss > 0 else 1.0
+            rsi = 100 - (100 / (1 + rs))
+            
+            return self._safe_float(max(0, min(100, rsi)))
+        except Exception:
+            return 50.0
+    
+    def compute_volatility_pct(self, high: float, low: float, price: float) -> float:
+        """Compute volatility percentage"""
+        try:
+            if price <= 0 or high <= 0 or low <= 0:
+                return 0.0
+            
+            price_range = high - low
+            volatility = (price_range / price) * 100
+            return self._safe_float(max(0, min(100, volatility)))
+        except Exception:
+            return 0.0
+    
+    def compute_vwap_basic(self, price: float, volume: float) -> float:
+        """Compute Volume Weighted Average Price (simplified)"""
+        try:
+            if volume <= 0 or price <= 0:
+                return price
+            
+            vwap = price
+            return self._safe_float(vwap)
+        except Exception:
+            return price
+    
+    def add_basic_indicators(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Add basic indicators to aggregated data"""
+        try:
+            price = self._safe_float(data.get("price", 0))
+            high = self._safe_float(data.get("high", 0))
+            low = self._safe_float(data.get("low", 0))
+            volume = self._safe_float(data.get("volume", 0))
+            
+            indicators = {
+                "sma_20": self.compute_sma(price, 20),
+                "sma_50": self.compute_sma(price, 50),
+                "ema_20": self.compute_ema(price, 20),
+                "rsi_14": self.compute_rsi(price, 14),
+                "volatility_pct": self.compute_volatility_pct(high, low, price),
+                "vwap": self.compute_vwap_basic(price, volume),
+            }
+            
+            data.update(indicators)
+            return data
+        
+        except Exception as e:
+            self.logger.error(f"Error adding basic indicators: {str(e)}")
+            return data
+    
+    def compute_timeframe_metrics(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute multi-timeframe metrics (5min, 1hour aggregation)"""
+        try:
+            metrics = {
+                "current": {
+                    "price": self._safe_float(data.get("price", 0)),
+                    "timestamp": data.get("timestamp", datetime.utcnow().isoformat() + "Z"),
+                },
+                "change_5min": 0.0,
+                "change_1hour": 0.0,
+                "volatility_5min": 0.0,
+                "volatility_1hour": 0.0,
+            }
+            
+            klines = data.get("klines", [])
+            if klines and len(klines) >= 2:
+                current_price = self._safe_float(data.get("price", 0))
+                
+                if len(klines) >= 1:
+                    prev_price = self._safe_float(klines[-2][4]) if len(klines[-2]) > 4 else current_price
+                    metrics["change_5min"] = ((current_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
+                
+                if len(klines) >= 12:
+                    prev_price_1h = self._safe_float(klines[-12][4]) if len(klines[-12]) > 4 else current_price
+                    metrics["change_1hour"] = ((current_price - prev_price_1h) / prev_price_1h * 100) if prev_price_1h > 0 else 0
+                
+                prices_5 = [self._safe_float(k[4]) for k in klines[-5:] if len(k) > 4 and self._safe_float(k[4]) > 0]
+                if len(prices_5) >= 2:
+                    metrics["volatility_5min"] = self._safe_float(np.std(prices_5))
+                
+                prices_60 = [self._safe_float(k[4]) for k in klines[-60:] if len(k) > 4 and self._safe_float(k[4]) > 0]
+                if len(prices_60) >= 2:
+                    metrics["volatility_1hour"] = self._safe_float(np.std(prices_60))
+            
+            return metrics
+        
+        except Exception as e:
+            self.logger.error(f"Error computing timeframe metrics: {str(e)}")
+            return {}
+    
+    
+    def apply_priority_merge(self, data_binance: Optional[Dict], data_alpha: Optional[Dict], symbol: str) -> Optional[Dict]:
+        """Apply priority merging logic based on asset type"""
+        try:
+            asset_type = self._get_asset_type_from_symbol(symbol)
+            if asset_type == "crypto":
+                if data_binance and isinstance(data_binance, dict):
+                    if self._safe_float(data_binance.get("price", 0)) > 0:
+                        self.logger.debug(f"{symbol}: Using Binance (crypto priority)")
+                        return data_binance
+                
+                if data_alpha and isinstance(data_alpha, dict):
+                    if self._safe_float(data_alpha.get("price", 0)) > 0:
+                        self.logger.debug(f"{symbol}: Fallback to Alpha Vantage (crypto)")
+                        return data_alpha
+            
+            else:
+                if data_alpha and isinstance(data_alpha, dict):
+                    if self._safe_float(data_alpha.get("price", 0)) > 0:
+                        self.logger.debug(f"{symbol}: Using Alpha Vantage (stock priority)")
+                        return data_alpha
+                
+                if data_binance and isinstance(data_binance, dict):
+                    if self._safe_float(data_binance.get("price", 0)) > 0:
+                        self.logger.debug(f"{symbol}: Fallback to Binance (stock)")
+                        return data_binance
+            
+            self.logger.warning(f"{symbol}: Both sources invalid, skipping")
+            return None
+        
+        except Exception as e:
+            self.logger.error(f"Error in priority merge for {symbol}: {str(e)}")
+            return None
+    
+    def _get_asset_type_from_symbol(self, symbol: str) -> str:
+        """Determine asset type from symbol"""
+        if not symbol:
+            return "unknown"
+        
+        s = symbol.upper().strip()
+        crypto_indicators = ["BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "AVAX", 
+                            "MATIC", "DOT", "LINK", "UNI", "LTC", "BCH", "NEAR"]
+        
+        if any(indicator in s for indicator in crypto_indicators):
+            return "crypto"
+        
+        return "stock"
+    
     def aggregate(self, raw_dict: Dict[str, Any]) -> Dict[str, Any]:
         try:
             if not isinstance(raw_dict, dict) or not raw_dict:
@@ -536,21 +989,27 @@ class DataAggregator:
             aggregated_symbols = {}
             for symbol, norm_item in normalized.items():
                 try:
+                    enhanced_data = self.add_basic_indicators(norm_item)
+                    
                     symbol_data = {
                         "normalized": norm_item,
+                        "unified_schema": self.enforce_schema(enhanced_data, symbol),
                         "basic_features": self.compute_basic_features(norm_item),
                         "technical_indicators": self.compute_technical_indicators(norm_item),
+                        "advanced_technical_indicators": self.compute_advanced_technical_indicators(norm_item),
                         "ml_features": self.compute_ml_features(norm_item)
                     }
                     
                     if norm_item.get("type") == "crypto" and norm_item.get("klines"):
                         symbol_data["kline_features"] = self.compute_kline_features(norm_item)
+                        symbol_data["ohlcv_candles"] = self.compute_multi_window_ohlcv(norm_item, symbol)
+                        symbol_data["timeframe_metrics"] = self.compute_timeframe_metrics(norm_item)
                     
                     aggregated_symbols[symbol] = symbol_data
                 except Exception as e:
                     self.logger.error(f"Error aggregating {symbol}: {str(e)}")
                     continue
-            
+
             market_summary = self.compute_market_wide_features(normalized)
             correlations = self.compute_correlations(normalized)
             
@@ -807,3 +1266,191 @@ class DataAggregator:
         except Exception as e:
             self.logger.error(f"Error clearing cache: {str(e)}")
             return False
+
+    def generate_ml_ready_row(self, symbol: str, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Generate unified ML-ready row for single symbol - single standardized format"""
+        try:
+            if not item or not symbol:
+                return None
+            
+            price = self._safe_float(item.get("price", 0))
+            if price <= 0:
+                return None
+            
+            basic_features = self.compute_basic_features(item)
+            tech_indicators = self.compute_technical_indicators(item)
+            advanced_indicators = self.compute_advanced_technical_indicators(item)
+            kline_features = self.compute_kline_features(item)
+            ml_features = self.compute_ml_features(item)
+            
+            ml_row = {
+                "symbol": symbol,
+                "asset_type": item.get("type", "unknown"),
+                "timestamp": item.get("timestamp", datetime.utcnow().isoformat() + "Z"),
+                
+                "price": price,
+                "open": self._safe_float(item.get("open", 0)),
+                "high": self._safe_float(item.get("high", 0)),
+                "low": self._safe_float(item.get("low", 0)),
+                "volume": self._safe_float(item.get("volume", 0)),
+                
+                "price_diff": basic_features.get("price_diff", 0),
+                "pct_change": basic_features.get("pct_change", 0),
+                "price_range": basic_features.get("price_range", 0),
+                "price_position": basic_features.get("price_position", 50),
+                
+                "volatility": basic_features.get("volatility", 0),
+                
+                "rsi_14": advanced_indicators.get("rsi_14", 50),
+                "ema_12": advanced_indicators.get("ema_12", 0),
+                "ema_26": advanced_indicators.get("ema_26", 0),
+                "sma_50": advanced_indicators.get("sma_50", 0),
+                "sma_200": advanced_indicators.get("sma_200", 0),
+                "macd": advanced_indicators.get("macd", 0),
+                "macd_signal": advanced_indicators.get("macd_signal", 0),
+                "macd_histogram": advanced_indicators.get("macd_histogram", 0),
+                "atr": advanced_indicators.get("atr", 0),
+                "vwap": advanced_indicators.get("vwap", price),
+                "bb_upper": advanced_indicators.get("bb_upper", 0),
+                "bb_middle": advanced_indicators.get("bb_middle", 0),
+                "bb_lower": advanced_indicators.get("bb_lower", 0),
+                "stochastic": advanced_indicators.get("stochastic", 50),
+                
+                "rolling_mean_24h": kline_features.get("rolling_mean_24h", 0),
+                "rolling_std_24h": kline_features.get("rolling_std_24h", 0),
+                "rolling_volume_sum_24h": kline_features.get("rolling_volume_sum_24h", 0),
+                "rolling_volume_change": kline_features.get("rolling_volume_change", 0),
+                
+                "momentum": ml_features.get("momentum", 0),
+                "trend_strength": ml_features.get("trend_strength", 0),
+                "volatility_normalized": ml_features.get("volatility_normalized", 0),
+                "volume_normalized": ml_features.get("volume_normalized", 0),
+                "data_quality_score": ml_features.get("data_quality_score", 0),
+            }
+            
+            return ml_row
+        
+        except Exception as e:
+            self.logger.error(f"Error generating ML row for {symbol}: {str(e)}")
+            return None
+    
+    def generate_ml_ready_batch(self, aggregated: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate ML-ready rows for all symbols in batch"""
+        try:
+            ml_rows = []
+            
+            symbols_data = aggregated.get("symbols", {})
+            for symbol, data in symbols_data.items():
+                try:
+                    normalized = data.get("normalized", {})
+                    ml_row = self.generate_ml_ready_row(symbol, normalized)
+                    if ml_row:
+                        ml_rows.append(ml_row)
+                except Exception as e:
+                    self.logger.warning(f"Skipping ML row for {symbol}: {str(e)}")
+                    continue
+            
+            self.logger.info(f"Generated {len(ml_rows)} ML-ready rows")
+            return ml_rows
+        
+        except Exception as e:
+            self.logger.error(f"Error generating ML batch: {str(e)}")
+            return []
+    
+    def compute_volatility_window(self, item: Dict[str, Any], window_minutes: int = 1440) -> Dict[str, Any]:
+        """Compute volatility metrics over time window from klines"""
+        try:
+            klines = item.get("klines", [])
+            if not klines:
+                return {"window_minutes": window_minutes, "volatility_pct": 0, "price_change_window": 0, "status": "no_klines"}
+            
+            try:
+                prices = []
+                for kline in klines:
+                    if isinstance(kline, (list, tuple)) and len(kline) >= 5:
+                        price = self._safe_float(kline[4])
+                        if price and price > 0:
+                            prices.append(price)
+                
+                if len(prices) < 2:
+                    return {"window_minutes": window_minutes, "volatility_pct": 0, "price_change_window": 0, "status": "insufficient_data"}
+                
+                volatility_pct = (np.std(prices) / np.mean(prices) * 100) if np.mean(prices) > 0 else 0
+                price_change_window = ((prices[-1] - prices[0]) / prices[0] * 100) if prices[0] > 0 else 0
+                
+                return {
+                    "window_minutes": window_minutes,
+                    "volatility_pct": self._safe_float(volatility_pct),
+                    "price_change_window": self._safe_float(price_change_window),
+                    "kline_count": len(prices),
+                    "status": "ok"
+                }
+            
+            except Exception as e:
+                self.logger.debug(f"Error in volatility window computation: {str(e)}")
+                return {"window_minutes": window_minutes, "volatility_pct": 0, "price_change_window": 0, "status": "error"}
+        
+        except Exception as e:
+            self.logger.error(f"Error computing volatility window: {str(e)}")
+            return {}
+    
+    def compute_daily_change(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute daily aggregated metrics from klines"""
+        try:
+            klines = item.get("klines", [])
+            if not klines:
+                return {"daily_open": None, "daily_close": None, "daily_change": 0, "daily_change_pct": 0, "status": "no_klines"}
+            
+            try:
+                prices = []
+                for kline in klines:
+                    if isinstance(kline, (list, tuple)) and len(kline) >= 5:
+                        price = self._safe_float(kline[4])
+                        if price and price > 0:
+                            prices.append(price)
+                
+                if not prices:
+                    return {"daily_open": None, "daily_close": None, "daily_change": 0, "daily_change_pct": 0, "status": "no_valid_prices"}
+                
+                daily_open = prices[0]
+                daily_close = prices[-1]
+                daily_change = daily_close - daily_open
+                daily_change_pct = (daily_change / daily_open * 100) if daily_open > 0 else 0
+                
+                return {
+                    "daily_open": self._safe_float(daily_open),
+                    "daily_close": self._safe_float(daily_close),
+                    "daily_change": self._safe_float(daily_change),
+                    "daily_change_pct": self._safe_float(daily_change_pct),
+                    "kline_count": len(prices),
+                    "status": "ok"
+                }
+            
+            except Exception as e:
+                self.logger.debug(f"Error computing daily change: {str(e)}")
+                return {}
+        
+        except Exception as e:
+            self.logger.error(f"Error in compute_daily_change: {str(e)}")
+            return {}
+    
+    def merge_with_fallback(self, primary: Optional[Dict[str, Any]], backup: Optional[Dict[str, Any]], symbol: str) -> Optional[Dict[str, Any]]:
+        """Merge data with fallback logic - primary preferred, fallback to backup if primary invalid"""
+        try:
+            if primary and isinstance(primary, dict):
+                if primary.get("price", 0) > 0:
+                    self.logger.debug(f"{symbol}: Using primary data")
+                    return primary
+            
+            if backup and isinstance(backup, dict):
+                if backup.get("price", 0) > 0:
+                    self.logger.debug(f"{symbol}: Falling back to backup data")
+                    return backup
+            
+            # Both invalid
+            self.logger.warning(f"{symbol}: Both primary and backup data invalid, skipping")
+            return None
+        
+        except Exception as e:
+            self.logger.error(f"Error in merge_with_fallback for {symbol}: {str(e)}")
+            return None

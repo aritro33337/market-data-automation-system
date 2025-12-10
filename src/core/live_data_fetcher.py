@@ -12,6 +12,8 @@ import re
 from requests.exceptions import HTTPError
 from urllib3.util.retry import Retry
 import threading
+import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class AssetType(Enum):
@@ -76,6 +78,7 @@ class LiveDataFetcher:
         self.rate_limit_delay = 0.5
         self.cache = {}
         self.cache_ttl = 300
+        self.cache_timestamps = {}
         self.cache_lock = threading.RLock()
 
         self.alpha_requests = []
@@ -335,33 +338,55 @@ class LiveDataFetcher:
             self.logger.error(f"Error building URL for {symbol}: {str(e)}")
             return "", "unknown"
 
+    def _calculate_backoff(self, attempt: int, base_delay: float = None) -> float:
+        if base_delay is None:
+            base_delay = self.retry_delay
+        
+        exponential = base_delay * (2 ** attempt)
+        jitter = random.uniform(0, 0.1 * exponential)
+        return exponential + jitter
+
     def _make_request(
-        self, url: str, symbol: str, api_type: str
+        self, url: str, symbol: str, api_type: str, timeout_override: Optional[int] = None
     ) -> Optional[Dict[str, Any]]:
         attempt = 0
         last_error = None
+        response_time_ms = 0
+        actual_timeout = timeout_override or self.timeout
 
         while attempt < self.max_retries:
             try:
                 self._enforce_rate_limit(api_type)
                 time.sleep(self.rate_limit_delay)
 
-                response = self.session.get(url, timeout=self.timeout)
+                start_time = time.time()
+                response = self.session.get(url, timeout=actual_timeout)
+                response_time_ms = int((time.time() - start_time) * 1000)
+                
                 response.raise_for_status()
 
                 data = response.json()
+                
+                if not isinstance(data, dict):
+                    raise ValueError(f"Invalid response type: {type(data)}")
+
                 self.logger.debug(
-                    f"Fetched {symbol} from {api_type} (attempt {attempt + 1})"
+                    f"Fetched {symbol} from {api_type} (attempt {attempt + 1}, {response_time_ms}ms)"
                 )
                 log_metric(
                     "api_request_success",
                     1,
-                    {"symbol": symbol, "api": api_type, "attempt": attempt + 1},
+                    {
+                        "symbol": symbol,
+                        "api": api_type,
+                        "attempt": attempt + 1,
+                        "response_time_ms": response_time_ms
+                    },
                 )
                 return data
 
             except requests.exceptions.Timeout:
-                last_error = f"Timeout for {symbol}"
+                last_error = f"Timeout for {symbol} (>{actual_timeout}s)"
                 self.logger.warning(
                     f"{last_error} (attempt {attempt + 1}/{self.max_retries})"
                 )
@@ -448,14 +473,14 @@ class LiveDataFetcher:
 
             attempt += 1
             if attempt < self.max_retries:
-                backoff = self.retry_delay * (2 ** (attempt - 1))
-                self.logger.debug(f"Retry {symbol} in {backoff}s...")
+                backoff = self._calculate_backoff(attempt - 1)
+                self.logger.debug(f"Retry {symbol} in {backoff:.2f}s...")
                 time.sleep(backoff)
 
         self.logger.error(
             f"Failed {symbol} after {self.max_retries} attempts: {last_error}"
         )
-        log_metric("api_max_retries_exceeded", 1, {"symbol": symbol})
+        log_metric("api_max_retries_exceeded", 1, {"symbol": symbol, "last_error": last_error})
         return None
 
     @correlation_decorator()
@@ -549,10 +574,84 @@ class LiveDataFetcher:
             self.logger.error(f"Validation error for {symbol}: {str(e)}")
             return None
 
+    def normalize_api_response(
+        self, data: Dict[str, Any], symbol: str, api_type: str
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            if not isinstance(data, dict):
+                return None
+
+            normalized = {
+                "symbol": symbol.upper().strip(),
+                "asset_type": "crypto" if self._get_asset_type(symbol) == AssetType.CRYPTO else "stock",
+                "source_api": api_type,
+                "raw_response": data,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "price": None,
+                "volume": None,
+                "high": None,
+                "low": None,
+                "open": None,
+                "change": None,
+                "change_percent": None,
+            }
+
+            if api_type == "binance":
+                normalized.update({
+                    "price": self._safe_float(data.get("lastPrice")),
+                    "volume": self._safe_float(data.get("volume")),
+                    "high": self._safe_float(data.get("highPrice")),
+                    "low": self._safe_float(data.get("lowPrice")),
+                    "open": self._safe_float(data.get("openPrice")),
+                    "change": self._safe_float(data.get("priceChange")),
+                    "change_percent": self._safe_float(data.get("priceChangePercent")),
+                    "bid": self._safe_float(data.get("bidPrice")),
+                    "ask": self._safe_float(data.get("askPrice")),
+                    "trade_count": self._safe_int(data.get("count", 0)),
+                })
+
+            elif api_type == "alpha_vantage":
+                quote = data.get("Global Quote", {})
+                normalized.update({
+                    "price": self._safe_float(quote.get("05. price")),
+                    "volume": self._safe_int(quote.get("06. volume", 0)),
+                    "high": self._safe_float(quote.get("03. high")),
+                    "low": self._safe_float(quote.get("04. low")),
+                    "open": self._safe_float(quote.get("02. open")),
+                    "change": self._safe_float(quote.get("09. change")),
+                    "change_percent": self._extract_percent(quote.get("10. change percent", "")),
+                    "previous_close": self._safe_float(quote.get("08. previous close")),
+                    "trading_day": quote.get("07. latest trading day", ""),
+                })
+
+            if normalized["price"] is None or normalized["price"] <= 0:
+                self.logger.warning(f"Invalid price for {symbol}: {normalized['price']}")
+                return None
+
+            return normalized
+
+        except Exception as e:
+            self.logger.error(f"Error normalizing response for {symbol}: {str(e)}")
+            return None
+
+    def _extract_percent(self, value: str) -> Optional[float]:
+        """Extract percentage value from string (e.g., '1.25%' -> 1.25)"""
+        try:
+            if not value or not isinstance(value, str):
+                return None
+            cleaned = value.replace("%", "").strip()
+            return self._safe_float(cleaned)
+        except Exception:
+            return None
+
     def _validate_alpha_vantage_response(
         self, data: Dict[str, Any], symbol: str
     ) -> Optional[Dict[str, Any]]:
+        """Validate and extract Alpha Vantage Global Quote response"""
         try:
+            if not isinstance(data, dict):
+                return None
+
             if "Error Message" in data:
                 self.logger.error(f"API error for {symbol}: {data['Error Message']}")
                 return None
@@ -576,23 +675,21 @@ class LiveDataFetcher:
                     self.logger.warning(f"Invalid price for {symbol}")
                     return None
 
+                change_pct_str = quote.get("10. change percent", "0%")
+                change_pct = self._extract_percent(change_pct_str) if isinstance(change_pct_str, str) else self._safe_float(change_pct_str)
+
                 validated = {
-                    "symbol": symbol,
-                    "type": "stock",
+                    "symbol": symbol.upper().strip(),
+                    "asset_type": "stock",
                     "price": price,
                     "high": self._safe_float(quote.get("03. high", None)),
                     "low": self._safe_float(quote.get("04. low", None)),
                     "open": self._safe_float(quote.get("02. open", None)),
-                    "volume": self._safe_int(quote.get("06. volume", 0)),
-                    "change": self._safe_float(quote.get("09. change", 0), 0.0),
-                    "change_percent": quote.get("10. change percent", "0%"),
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "api": "alpha_vantage",
-                    "trading_day": quote.get("07. latest trading day", ""),
-                    "previous_close": self._safe_float(
-                        quote.get("08. previous close", None)
-                    ),
-                    "data_format": "ml_ready_v1",
+                    "volume": self._safe_float(quote.get("06. volume", 0)),
+                    "change": self._safe_float(quote.get("09. change", 0)),
+                    "change_percent": change_pct,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "source_api": "alpha_vantage",
                 }
 
                 self.logger.debug(f"Validated Alpha Vantage response for {symbol}")
@@ -609,6 +706,7 @@ class LiveDataFetcher:
     def _validate_binance_response(
         self, data: Dict[str, Any], symbol: str
     ) -> Optional[Dict[str, Any]]:
+        """Validate and extract Binance 24hr ticker response"""
         try:
             if not data or not isinstance(data, dict):
                 self.logger.warning(f"Invalid Binance response for {symbol}")
@@ -627,29 +725,17 @@ class LiveDataFetcher:
                 symbol_clean = self._normalize_crypto_symbol(symbol)
 
                 validated = {
-                    "symbol": symbol_clean,
-                    "type": "crypto",
+                    "symbol": symbol_clean.upper().strip(),
+                    "asset_type": "crypto",
                     "price": price,
                     "high": self._safe_float(data.get("highPrice", None)),
                     "low": self._safe_float(data.get("lowPrice", None)),
                     "open": self._safe_float(data.get("openPrice", None)),
-                    "volume": self._safe_float(data.get("volume", 0), 0.0),
-                    "quote_volume": self._safe_float(
-                        data.get("quoteAssetVolume", 0), 0.0
-                    ),
+                    "volume": self._safe_float(data.get("volume", 0)),
                     "change": self._safe_float(data.get("priceChange", None)),
-                    "change_percent": self._safe_float(
-                        data.get("priceChangePercent", None)
-                    ),
-                    "bid": self._safe_float(data.get("bidPrice", None)),
-                    "ask": self._safe_float(data.get("askPrice", None)),
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "api": "binance",
-                    "trade_count": self._safe_int(data.get("count", 0), 0),
-                    "weighted_avg_price": self._safe_float(
-                        data.get("weightedAvgPrice", None)
-                    ),
-                    "data_format": "ml_ready_v1",
+                    "change_percent": self._safe_float(data.get("priceChangePercent", None)),
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "source_api": "binance",
                 }
 
                 self.logger.debug(f"Validated Binance response for {symbol_clean}")
@@ -663,7 +749,120 @@ class LiveDataFetcher:
             self.logger.error(f"Binance validation error for {symbol}: {str(e)}")
             return None
 
-    def fetch_all_symbols(self) -> Dict[str, Any]:
+    def fetch_ticker_response(self, symbol: str, api_type: str = "binance") -> Optional[Dict[str, Any]]:
+        """Extract ticker/price data from API response"""
+        try:
+            url, api_type_used = self._build_url(symbol, endpoint="ticker")
+            if not url:
+                return None
+            
+            response_data = self._make_request(url, symbol, api_type_used)
+            if not response_data or not isinstance(response_data, dict):
+                self.logger.warning(f"Invalid ticker response for {symbol}")
+                return None
+            
+            validated = self._validate_api_response(response_data, symbol, api_type_used)
+            if not validated:
+                self.logger.warning(f"Ticker validation failed for {symbol}")
+                return None
+            
+            self.logger.debug(f"Ticker fetched for {symbol}: ${validated.get('price')}")
+            return validated
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching ticker for {symbol}: {str(e)}")
+            return None
+
+    def fetch_kline_response(self, symbol: str, interval: str = "1h", limit: int = 100) -> Optional[List[Any]]:
+        """Extract kline/candlestick data from Binance"""
+        try:
+            if self._get_asset_type(symbol) != AssetType.CRYPTO:
+                self.logger.debug(f"Klines only for crypto, skipping {symbol}")
+                return None
+            
+            url, api_type = self._build_url(symbol, endpoint="klines")
+            if not url:
+                return None
+            
+            url = f"{url}&interval={interval}&limit={limit}"
+            
+            klines_data = self._make_request(url, symbol, api_type)
+            if not isinstance(klines_data, list) or len(klines_data) == 0:
+                self.logger.debug(f"No kline data for {symbol}")
+                return None
+            
+            valid_klines = []
+            for kline in klines_data:
+                if isinstance(kline, (list, tuple)) and len(kline) >= 8:
+                    try:
+                        float(kline[1])
+                        float(kline[2])
+                        float(kline[3])
+                        float(kline[4])
+                        float(kline[7])
+                        valid_klines.append(kline)
+                    except (ValueError, TypeError, IndexError):
+                        continue
+            
+            self.logger.debug(f"Fetched {len(valid_klines)} klines for {symbol}")
+            return valid_klines if valid_klines else None
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching klines for {symbol}: {str(e)}")
+            return None
+
+    def fetch_depth_response(self, symbol: str, limit: int = 20) -> Optional[Dict[str, Any]]:
+        """Extract order book depth data from Binance"""
+        try:
+            if self._get_asset_type(symbol) != AssetType.CRYPTO:
+                self.logger.debug(f"Depth only for crypto, skipping {symbol}")
+                return None
+            
+            url, api_type = self._build_url(symbol, endpoint="depth")
+            if not url:
+                return None
+            
+            url = f"{url}&limit={limit}"
+            
+            depth_data = self._make_request(url, symbol, api_type)
+            if not isinstance(depth_data, dict):
+                self.logger.debug(f"Invalid depth response for {symbol}")
+                return None
+            
+            if "bids" not in depth_data or "asks" not in depth_data:
+                self.logger.warning(f"Missing bids/asks for {symbol}")
+                return None
+            
+            bids = depth_data.get("bids", [])
+            asks = depth_data.get("asks", [])
+            
+            if not isinstance(bids, list) or not isinstance(asks, list):
+                return None
+            
+            depth_metrics = {
+                "symbol": symbol,
+                "timestamp": datetime.utcnow().isoformat(),
+                "bid_count": len(bids),
+                "ask_count": len(asks),
+                "bid_volume": sum(self._safe_float(b[1], 0) for b in bids if len(b) >= 2),
+                "ask_volume": sum(self._safe_float(a[1], 0) for a in asks if len(a) >= 2),
+                "spread": None
+            }
+            
+            if len(bids) > 0 and len(asks) > 0:
+                best_bid = self._safe_float(bids[0][0], 0)
+                best_ask = self._safe_float(asks[0][0], 0)
+                if best_bid > 0 and best_ask > 0:
+                    depth_metrics["spread"] = best_ask - best_bid
+            
+            self.logger.debug(f"Depth fetched for {symbol}: {depth_metrics['bid_count']} bids, {depth_metrics['ask_count']} asks")
+            return depth_metrics
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching depth for {symbol}: {str(e)}")
+            return None
+
+    def fetch_all_symbols(self, max_workers: int = 5, use_parallel: bool = True) -> Dict[str, Any]:
         results = {}
         start_time = time.time()
         successful_fetches = 0
@@ -676,20 +875,19 @@ class LiveDataFetcher:
                 self.logger.warning("No symbols to fetch")
                 return results
 
-            self.logger.info(f"Starting fetch for {len(symbols_to_fetch)} symbols")
+            self.logger.info(
+                f"Starting fetch for {len(symbols_to_fetch)} symbols "
+                f"(parallel={use_parallel}, workers={max_workers})"
+            )
 
-            for i, symbol in enumerate(symbols_to_fetch, 1):
-                try:
-                    self.logger.debug(f"Fetching {i}/{len(symbols_to_fetch)}: {symbol}")
-                    data = self.fetch_single_symbol(symbol)
-                    if data:
-                        results[symbol] = data
-                        successful_fetches += 1
-                    else:
-                        failed_fetches += 1
-                except Exception as e:
-                    failed_fetches += 1
-                    self.logger.error(f"Error fetching {symbol}: {str(e)}")
+            if use_parallel and len(symbols_to_fetch) > 1:
+                results, successful_fetches, failed_fetches = self._fetch_parallel(
+                    symbols_to_fetch, max_workers
+                )
+            else:
+                results, successful_fetches, failed_fetches = self._fetch_sequential(
+                    symbols_to_fetch
+                )
 
             elapsed_time = time.time() - start_time
             success_rate = (
@@ -710,6 +908,7 @@ class LiveDataFetcher:
                     "total": len(symbols_to_fetch),
                     "duration_seconds": elapsed_time,
                     "success_rate": success_rate,
+                    "parallel": use_parallel,
                 },
             )
 
@@ -719,6 +918,102 @@ class LiveDataFetcher:
             self.logger.error(f"Error in fetch_all_symbols: {str(e)}")
             log_metric("fetch_all_error", 0, {"error": str(e)})
             return results
+
+    def _fetch_sequential(
+        self, symbols_to_fetch: List[str]
+    ) -> Tuple[Dict[str, Any], int, int]:
+        results = {}
+        successful_fetches = 0
+        failed_fetches = 0
+
+        for i, symbol in enumerate(symbols_to_fetch, 1):
+            try:
+                self.logger.debug(f"Fetching {i}/{len(symbols_to_fetch)}: {symbol}")
+                data = self.fetch_single_symbol(symbol)
+                if data:
+                    results[symbol] = data
+                    successful_fetches += 1
+                else:
+                    failed_fetches += 1
+            except Exception as e:
+                failed_fetches += 1
+                self.logger.error(f"Error fetching {symbol}: {str(e)}")
+
+        return results, successful_fetches, failed_fetches
+
+    def _fetch_parallel(
+        self, symbols_to_fetch: List[str], max_workers: int
+    ) -> Tuple[Dict[str, Any], int, int]:
+        results = {}
+        successful_fetches = 0
+        failed_fetches = 0
+
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_symbol = {
+                    executor.submit(self.fetch_single_symbol, symbol): symbol
+                    for symbol in symbols_to_fetch
+                }
+
+                for future in as_completed(future_to_symbol):
+                    symbol = future_to_symbol[future]
+                    try:
+                        data = future.result(timeout=self.timeout + 5)
+                        if data:
+                            results[symbol] = data
+                            successful_fetches += 1
+                        else:
+                            failed_fetches += 1
+                    except Exception as e:
+                        failed_fetches += 1
+                        self.logger.error(
+                            f"Error fetching {symbol} in parallel: {str(e)}"
+                        )
+
+        except Exception as e:
+            self.logger.error(f"Error in parallel execution: {str(e)}")
+
+        return results, successful_fetches, failed_fetches
+
+    def _is_cache_valid(self, symbol: str, custom_ttl: Optional[int] = None) -> bool:
+        """Check if cached data for symbol is still valid (per-symbol TTL)"""
+        try:
+            with self.cache_lock:
+                if symbol not in self.cache:
+                    return False
+                
+                ttl = custom_ttl or self.cache_ttl
+                timestamp = self.cache_timestamps.get(symbol, 0)
+                current_time = time.time()
+                
+                is_valid = (current_time - timestamp) < ttl
+                if not is_valid:
+                    del self.cache[symbol]
+                    del self.cache_timestamps[symbol]
+                
+                return is_valid
+        except Exception as e:
+            self.logger.debug(f"Cache validation error for {symbol}: {str(e)}")
+            return False
+
+    def _get_cached(self, symbol: str, custom_ttl: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Get data from cache if valid"""
+        if self._is_cache_valid(symbol, custom_ttl):
+            try:
+                with self.cache_lock:
+                    return self.cache.get(symbol)
+            except Exception as e:
+                self.logger.debug(f"Error retrieving cache for {symbol}: {str(e)}")
+        return None
+
+    def _set_cache(self, symbol: str, data: Dict[str, Any]) -> None:
+        """Set cache with timestamp for per-symbol TTL tracking"""
+        try:
+            with self.cache_lock:
+                self.cache[symbol] = data
+                self.cache_timestamps[symbol] = time.time()
+        except Exception as e:
+            self.logger.debug(f"Error setting cache for {symbol}: {str(e)}")
 
     def save_raw(self, data: Dict[str, Any]) -> bool:
         try:
