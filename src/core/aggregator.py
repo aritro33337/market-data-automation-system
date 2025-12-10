@@ -1051,11 +1051,11 @@ class DataAggregator:
             }
         }
     
-    def save_excel_ready(self, aggregated: Dict[str, Any]) -> bool:
+    def prepare_excel_data(self, aggregated: Dict[str, Any]) -> List[Dict[str, Any]]:
         try:
             if not aggregated or not aggregated.get("symbols"):
-                self.logger.warning("save_excel_ready: no data to save")
-                return False
+                self.logger.warning("prepare_excel_data: no data to process")
+                return []
             
             excel_rows = []
             symbols_data = aggregated.get("symbols", {})
@@ -1100,39 +1100,20 @@ class DataAggregator:
                     continue
             
             if not excel_rows:
-                self.logger.warning("save_excel_ready: no rows to save")
-                return False
+                self.logger.warning("prepare_excel_data: no rows generated")
+                return []
             
-            output_dir = self.config.get("export", {}).get("excel_output_folder", "data/exports/")
-            prefix = self.config.get("export", {}).get("excel_file_prefix", "market_data_")
-            include_timestamp = self.config.get("export", {}).get("include_timestamp_in_filename", True)
-            
-            if include_timestamp:
-                timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                filename = f"{prefix}{timestamp}.json"
-            else:
-                filename = f"{prefix}latest.json"
-            
-            filepath = Path(output_dir) / filename
-            
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(excel_rows, f, indent=2, ensure_ascii=False)
-            
-            self.logger.info(f"Saved Excel-ready data: {filepath} ({len(excel_rows)} rows)")
-            log_metric("excel_ready_save", len(excel_rows), {"filepath": str(filepath)})
-            
-            return True
+            return excel_rows
         
         except Exception as e:
-            self.logger.error(f"Error in save_excel_ready: {str(e)}\n{traceback.format_exc()}")
-            log_metric("excel_ready_save", 0, {"status": "failed", "error": str(e)})
-            return False
+            self.logger.error(f"Error in prepare_excel_data: {str(e)}\\n{traceback.format_exc()}")
+            return []
     
-    def save_ml_ready(self, aggregated: Dict[str, Any]) -> bool:
+    def prepare_ml_data(self, aggregated: Dict[str, Any]) -> Dict[str, Any]:
         try:
             if not aggregated or not aggregated.get("symbols"):
-                self.logger.warning("save_ml_ready: no data to save")
-                return False
+                self.logger.warning("prepare_ml_data: no data to process")
+                return {}
             
             ml_ready_data = {}
             symbols_data = aggregated.get("symbols", {})
@@ -1185,6 +1166,8 @@ class DataAggregator:
             if not ml_ready_data:
                 self.logger.warning("save_ml_ready: no data prepared")
                 return False
+                self.logger.warning("prepare_ml_data: no data prepared")
+                return {}
             
             market_summary = aggregated.get("market_summary", {})
             correlations = aggregated.get("correlations", {})
@@ -1196,25 +1179,11 @@ class DataAggregator:
                 "timestamp": datetime.utcnow().isoformat() + "Z"
             }
             
-            output_dir = "data/ml_ready/"
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-            
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            filename = f"ml_data_{timestamp}.json"
-            filepath = Path(output_dir) / filename
-            
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(full_ml_data, f, indent=2, ensure_ascii=False)
-            
-            self.logger.info(f"Saved ML-ready data: {filepath} ({len(ml_ready_data)} symbols)")
-            log_metric("ml_ready_save", len(ml_ready_data), {"filepath": str(filepath)})
-            
-            return True
+            return full_ml_data
         
         except Exception as e:
-            self.logger.error(f"Error in save_ml_ready: {str(e)}\n{traceback.format_exc()}")
-            log_metric("ml_ready_save", 0, {"status": "failed", "error": str(e)})
-            return False
+            self.logger.error(f"Error in prepare_ml_data: {str(e)}\\n{traceback.format_exc()}")
+            return {}
     
     @correlation_decorator()
     def run(self, raw_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1224,13 +1193,19 @@ class DataAggregator:
             aggregated = self.aggregate(raw_dict)
             
             if aggregated.get("metadata", {}).get("total_symbols", 0) > 0:
-                excel_saved = self.save_excel_ready(aggregated)
-                ml_saved = self.save_ml_ready(aggregated)
+                excel_rows = self.prepare_excel_data(aggregated)
+                ml_data = self.prepare_ml_data(aggregated)
+                
+                if excel_rows:
+                    aggregated["excel_rows"] = excel_rows
+                
+                if ml_data:
+                    aggregated["ml_data"] = ml_data
                 
                 log_metric("run_complete", 1, {
                     "symbols": len(aggregated.get("symbols", {})),
-                    "excel_saved": excel_saved,
-                    "ml_saved": ml_saved
+                    "excel_rows_count": len(excel_rows),
+                    "ml_data_present": bool(ml_data)
                 })
                 
                 return aggregated

@@ -371,3 +371,36 @@ class TestDataAggregator:
         assert "AAPL" in result
         assert result["BTC"]["type"] == "crypto"
         assert result["AAPL"]["type"] == "stock"
+
+    def test_prepare_excel_data(self, aggregator):
+        aggregated = {
+            "symbols": {
+                "AAPL": {
+                    "normalized": {"price": 150.0},
+                    "basic_features": {},
+                    "technical_indicators": {},
+                    "ml_features": {},
+                    "kline_features": {}
+                }
+            }
+        }
+        
+        result = aggregator.prepare_excel_data(aggregated)
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["symbol"] == "AAPL"
+
+    def test_prepare_ml_data(self, aggregator):
+        aggregated = {
+            "symbols": {
+                "AAPL": {
+                    "normalized": {"price": 150.0},
+                    "ml_features": {"momentum": 0.5}
+                }
+            }
+        }
+        
+        result = aggregator.prepare_ml_data(aggregated)
+        assert isinstance(result, dict)
+        assert "symbols" in result
+        assert "AAPL" in result["symbols"]
