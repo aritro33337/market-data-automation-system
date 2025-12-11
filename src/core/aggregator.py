@@ -2,7 +2,7 @@ from src.utils.logger import get_logger, log_metric, correlation_decorator
 from src.utils.config_loader import ConfigLoader
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import json
 import numpy as np
@@ -147,7 +147,7 @@ class DataAggregator:
             if isinstance(timestamp_raw, str):
                 timestamp = timestamp_raw
             else:
-                timestamp = datetime.utcnow().isoformat() + "Z"
+                timestamp = datetime.now(timezone.utc).isoformat()
             
             normalized = {
                 "symbol": symbol,
@@ -356,7 +356,7 @@ class DataAggregator:
             candle.high = self._safe_float(max(prices) if prices else None)
             candle.low = self._safe_float(min(prices) if prices else None)
             candle.volume = self._safe_float(sum(volumes))
-            candle.timestamp = datetime.utcnow().isoformat() + "Z"
+            candle.timestamp = datetime.now(timezone.utc).isoformat() + "Z"
             candle.trade_count = len(prices)
 
             return candle.to_dict()
@@ -698,7 +698,7 @@ class DataAggregator:
             
             market_summary["total_volume"] = self._safe_float(np.sum(all_volumes))
             market_summary["asset_count"] = len(all_items)
-            market_summary["timestamp"] = datetime.utcnow().isoformat() + "Z"
+            market_summary["timestamp"] = datetime.now(timezone.utc).isoformat() + "Z"
             
             return market_summary
         
@@ -714,7 +714,7 @@ class DataAggregator:
             "global_volatility": 0.0,
             "total_volume": 0.0,
             "asset_count": 0,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
         }
     
     def compute_correlations(self, all_items: Dict[str, Any]) -> Dict[str, Any]:
@@ -757,13 +757,13 @@ class DataAggregator:
                 stock_avg_change = np.mean([self._safe_float(v.get("change_percent", 0)) for v in stock_items.values()])
                 correlations["crypto_vs_stock"] = self._safe_float(crypto_avg_change - stock_avg_change)
             
-            correlations["timestamp"] = datetime.utcnow().isoformat() + "Z"
+            correlations["timestamp"] = datetime.now(timezone.utc).isoformat() + "Z"
             
             return correlations
         
         except Exception as e:
             self.logger.error(f"Error in compute_correlations: {str(e)}\n{traceback.format_exc()}")
-            return {"status": "error", "timestamp": datetime.utcnow().isoformat() + "Z"}
+            return {"status": "error", "timestamp": datetime.now(timezone.utc).isoformat() + "Z"}
     
     def enforce_schema(self, data: Dict[str, Any], symbol: str) -> Dict[str, Any]:
         """Enforce unified output schema - single standardized format for all data"""
@@ -781,7 +781,7 @@ class DataAggregator:
                 "volume": self._safe_float(data.get("volume", 0)),
                 "change": self._safe_float(data.get("change", 0)),
                 "change_percent": self._safe_float(data.get("change_percent", 0)),
-                "timestamp": data.get("timestamp", datetime.utcnow().isoformat() + "Z"),
+                "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat() + "Z"),
             }
             
             features = data.get("basic_features", {})
@@ -896,7 +896,7 @@ class DataAggregator:
             metrics = {
                 "current": {
                     "price": self._safe_float(data.get("price", 0)),
-                    "timestamp": data.get("timestamp", datetime.utcnow().isoformat() + "Z"),
+                    "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat() + "Z"),
                 },
                 "change_5min": 0.0,
                 "change_1hour": 0.0,
@@ -1017,7 +1017,7 @@ class DataAggregator:
                 "symbols": aggregated_symbols,
                 "market_summary": market_summary,
                 "correlations": correlations,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                 "metadata": {
                     "total_symbols": len(aggregated_symbols),
                     "crypto_count": len([s for s in aggregated_symbols.values() if s["normalized"].get("type") == "crypto"]),
@@ -1043,7 +1043,7 @@ class DataAggregator:
             "symbols": {},
             "market_summary": self._get_empty_market_summary(),
             "correlations": {"status": "no_data"},
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
             "metadata": {
                 "total_symbols": 0,
                 "crypto_count": 0,
@@ -1084,7 +1084,7 @@ class DataAggregator:
                         "momentum": ml.get("momentum", 0),
                         "trend_strength": ml.get("trend_strength", 0),
                         "data_quality": ml.get("data_quality_score", 0),
-                        "timestamp": norm.get("timestamp", datetime.utcnow().isoformat())
+                        "timestamp": norm.get("timestamp", datetime.now(timezone.utc).isoformat())
                     }
                     
                     if kline:
@@ -1146,7 +1146,7 @@ class DataAggregator:
                             "type": norm.get("type", "unknown"),
                             "api": norm.get("api", "unknown"),
                             "data_quality": ml.get("data_quality_score", 0),
-                            "timestamp": norm.get("timestamp", datetime.utcnow().isoformat())
+                            "timestamp": norm.get("timestamp", datetime.now(timezone.utc).isoformat())
                         }
                     }
                     
@@ -1176,7 +1176,7 @@ class DataAggregator:
                 "symbols": ml_ready_data,
                 "market_summary": market_summary,
                 "correlations": correlations,
-                "timestamp": datetime.utcnow().isoformat() + "Z"
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
             
             return full_ml_data
@@ -1225,7 +1225,7 @@ class DataAggregator:
                 return {
                     "normalized_cache_size": len(self.normalized_cache),
                     "feature_cache_size": len(self.feature_cache),
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
         except Exception as e:
             self.logger.error(f"Error in get_cache_status: {str(e)}")
@@ -1261,7 +1261,7 @@ class DataAggregator:
             ml_row = {
                 "symbol": symbol,
                 "asset_type": item.get("type", "unknown"),
-                "timestamp": item.get("timestamp", datetime.utcnow().isoformat() + "Z"),
+                "timestamp": item.get("timestamp", datetime.now(timezone.utc).isoformat() + "Z"),
                 
                 "price": price,
                 "open": self._safe_float(item.get("open", 0)),

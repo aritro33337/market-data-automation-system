@@ -28,14 +28,22 @@ class ConfigLoader:
         path = Path(path)
 
         if not path.exists():
-            msg = f"Config file not found: {path}"
-            logger.error(msg)
-            ConfigLoader._log_metric(
-                "config_load_failure",
-                0,
-                {"path": str(path), "reason": "file_not_found"}
-            )
-            raise FileNotFoundError(msg)
+            # Try to copy from example if it exists
+            example_path = path.parent / "settings_example.json"
+            if example_path.exists():
+                logger.warning(f"Config file not found: {path}. Creating from {example_path}")
+                import shutil
+                shutil.copy(example_path, path)
+                logger.info(f"Created {path} from example configuration")
+            else:
+                msg = f"Config file not found: {path}"
+                logger.error(msg)
+                ConfigLoader._log_metric(
+                    "config_load_failure",
+                    0,
+                    {"path": str(path), "reason": "file_not_found"}
+                )
+                raise FileNotFoundError(msg)
 
         try:
             with open(path, "r", encoding="utf-8") as f:

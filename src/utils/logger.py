@@ -11,7 +11,7 @@ import random
 import time
 import platform
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional, Any, Union, Callable
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
@@ -64,7 +64,7 @@ class JsonFormatter(logging.Formatter):
         sanitized_message = PIISanitizer.sanitize(message)
         
         log_data = {
-            "timestamp": datetime.utcnow().isoformat() + f".{int(datetime.utcnow().microsecond/1000):03d}",
+            "timestamp": datetime.now(timezone.utc).isoformat() + f".{int(datetime.now(timezone.utc).microsecond/1000):03d}",
             "level": record.levelname,
             "module": record.name,
             "message": sanitized_message,
@@ -133,7 +133,7 @@ class EnterpriseFileFormatter(logging.Formatter):
         
         if self.use_json:
             log_data = {
-                "timestamp": datetime.utcnow().isoformat() + f".{int(datetime.utcnow().microsecond/1000):03d}",
+                "timestamp": datetime.now(timezone.utc).isoformat() + f".{int(datetime.now(timezone.utc).microsecond/1000):03d}",
                 "level": record.levelname,
                 "module": record.name,
                 "message": record.message,
@@ -592,7 +592,7 @@ class Logger:
             "metric_name": name,
             "value": value,
             "tags": tags or {},
-            "timestamp": datetime.utcnow().isoformat() + f".{int(datetime.utcnow().microsecond/1000):03d}"
+            "timestamp": datetime.now(timezone.utc).isoformat() + f".{int(datetime.now(timezone.utc).microsecond/1000):03d}"
         }
         
         old_factory = metrics_logger.makeRecord
@@ -615,7 +615,7 @@ class Logger:
         cid = correlation_id or self.get_correlation_id() or str(uuid.uuid4())
         return {
             "correlation_id": cid,
-            "timestamp": datetime.utcnow().isoformat() + f".{int(datetime.utcnow().microsecond/1000):03d}",
+            "timestamp": datetime.now(timezone.utc).isoformat() + f".{int(datetime.now(timezone.utc).microsecond/1000):03d}",
             "thread_id": threading.get_ident(),
             "process_id": os.getpid(),
             "host": hostname

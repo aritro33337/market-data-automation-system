@@ -142,7 +142,6 @@ class TestExcelExporter:
         assert result is not None
         assert os.path.exists(result)
 
-    @pytest.mark.xfail(reason="Implementation calls _apply_enterprise_styling without df argument")
     def test_export_multi_sheet_valid(self, exporter):
         data_dict = {
             "Sheet1": pd.DataFrame({

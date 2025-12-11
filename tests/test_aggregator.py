@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from src.core.aggregator import DataAggregator, TimeWindow, OHLCVCandle
-from datetime import datetime
+from datetime import datetime, timezone
 import numpy as np
 
 
@@ -170,7 +170,7 @@ class TestDataAggregator:
         candle.low = 99.0
         candle.close = 104.0
         candle.volume = 1000.0
-        candle.timestamp = datetime.utcnow().isoformat()
+        candle.timestamp = datetime.now(timezone.utc).isoformat()
 
         candle_dict = candle.to_dict()
         assert candle_dict["window"] == "1h"

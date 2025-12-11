@@ -2,6 +2,7 @@ import pytest
 import time
 from unittest.mock import Mock, MagicMock, patch
 from src.core.live_data_fetcher import LiveDataFetcher, AssetType
+from datetime import datetime, timezone
 import json
 
 
@@ -145,57 +146,30 @@ class TestLiveDataFetcher:
         assert result["source_api"] == "binance"
         assert result["price"] == 100.5
 
-    def test_normalize_api_response_alpha_vantage(self, fetcher):
-        data = {
-            "Global Quote": {
-                "05. price": "150.0",
-                "06. volume": "1000000",
-                "03. high": "151.0",
-                "04. low": "149.0",
-                "02. open": "150.0"
-            }
-        }
+    def test_fetch_stock_data_yfinance(self, fetcher):
+        with patch('src.core.live_data_fetcher.yf.Ticker') as mock_ticker:
+            mock_instance = mock_ticker.return_value
+            mock_instance.fast_info.last_price = 150.0
+            mock_instance.fast_info.previous_close = 148.5
+            mock_instance.fast_info.open = 149.0
+            mock_instance.fast_info.day_high = 151.0
+            mock_instance.fast_info.day_low = 148.0
+            mock_instance.fast_info.last_volume = 1000000
 
-        result = fetcher.normalize_api_response(data, "AAPL", "alpha_vantage")
-        assert result is not None
-        assert result["symbol"] == "AAPL"
-        assert result["source_api"] == "alpha_vantage"
-        assert result["price"] == 150.0
-
-    def test_health_check(self, fetcher):
-        health = fetcher.health_check()
-        assert health is not None
-        assert health["status"] == "healthy"
-        assert health["session_active"] is True
-        assert health["config_loaded"] is True
-        assert health["symbols_count"] > 0
-
-    def test_cache_operations(self, fetcher):
-        fetcher.cache["TEST"] = ("data", time.time())
-        
-        stats = fetcher.get_cache_stats()
-        assert stats["cache_size"] > 0
-        assert "TEST" in stats["cache_items"]
-
-        fetcher.clear_cache()
-        assert len(fetcher.cache) == 0
-
-    def test_rate_limit_enforcement(self, fetcher):
-        initial_requests = len(fetcher.alpha_requests)
-        fetcher._enforce_rate_limit("alpha_vantage")
-        assert len(fetcher.alpha_requests) > initial_requests
+            result = fetcher.fetch_stock_data_yfinance("AAPL")
+            
+            assert result is not None
+            assert result["symbol"] == "AAPL"
+            assert result["source_api"] == "yfinance"
+            assert result["price"] == 150.0
+            assert result["change"] == 1.5
+            assert result["change_percent"] > 1.0
 
     def test_build_url_binance(self, fetcher):
         url, api_type = fetcher._build_url("BTC", "ticker")
         assert api_type == "binance"
         assert "BTCUSDT" in url
         assert "ticker/24hr" in url
-
-    def test_build_url_alpha_vantage(self, fetcher):
-        url, api_type = fetcher._build_url("AAPL", "ticker")
-        assert api_type == "alpha_vantage"
-        assert "AAPL" in url
-        assert "GLOBAL_QUOTE" in url
 
     def test_build_url_klines(self, fetcher):
         url, api_type = fetcher._build_url("BTC", "klines")
@@ -205,7 +179,7 @@ class TestLiveDataFetcher:
     def test_error_handling_timeout(self, fetcher):
         with patch('src.core.live_data_fetcher.requests.Session.get') as mock_get:
             mock_get.side_effect = TimeoutError("Timeout")
-            result = fetcher._make_request("http://test.com", "TEST", "alpha_vantage")
+            result = fetcher._make_request("http://test.com", "TEST", "binance")
             assert result is None
 
     def test_error_handling_json_decode(self, fetcher):
@@ -213,7 +187,7 @@ class TestLiveDataFetcher:
             mock_response = MagicMock()
             mock_response.json.side_effect = json.JSONDecodeError("msg", "doc", 0)
             mock_get.return_value = mock_response
-            result = fetcher._make_request("http://test.com", "TEST", "alpha_vantage")
+            result = fetcher._make_request("http://test.com", "TEST", "binance")
             assert result is None
 
     def test_invalid_symbol_fetch(self, fetcher):

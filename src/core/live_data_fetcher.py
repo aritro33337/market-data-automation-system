@@ -4,7 +4,7 @@ import requests
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import json
 from enum import Enum
@@ -13,7 +13,10 @@ from requests.exceptions import HTTPError
 from urllib3.util.retry import Retry
 import threading
 import random
+import threading
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import yfinance as yf
 
 
 class AssetType(Enum):
@@ -62,7 +65,24 @@ class LiveDataFetcher:
         "NEAR",
     ]
 
-    ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
+    CRYPTO_SYMBOLS = [
+        "BTC",
+        "ETH",
+        "BNB",
+        "SOL",
+        "XRP",
+        "ADA",
+        "DOGE",
+        "AVAX",
+        "MATIC",
+        "DOT",
+        "LINK",
+        "UNI",
+        "LTC",
+        "BCH",
+        "NEAR",
+    ]
+
     BINANCE_URL = "https://api.binance.com/api/v3"
 
     def __init__(self, config_path: str = "config/settings.json"):
@@ -81,8 +101,8 @@ class LiveDataFetcher:
         self.cache_timestamps = {}
         self.cache_lock = threading.RLock()
 
-        self.alpha_requests = []
-        self.max_alpha_requests_per_minute = 5
+        self.cache_lock = threading.RLock()
+
         self.binance_requests = []
         self.max_binance_requests_per_minute = 1200
         self.rate_limit_lock = threading.RLock()
@@ -102,7 +122,7 @@ class LiveDataFetcher:
                 1,
                 {
                     "status": "success",
-                    "apis": ["alpha_vantage", "binance"],
+                    "apis": ["yfinance", "binance"],
                     "klines": self.fetch_klines,
                     "trades": self.fetch_trades,
                     "orderbook": self.fetch_orderbook,
@@ -131,11 +151,7 @@ class LiveDataFetcher:
                 self.logger.warning("No symbols configured, using defaults")
                 self.symbols = ["AAPL", "TSLA", "BTC", "ETH"]
 
-            self.api_key = os.getenv("ALPHAVANTAGE_API_KEY") or self.config.get(
-                "api", {}
-            ).get("api_key", "demo")
-            if self.api_key == "demo":
-                self.logger.warning("Using demo API key - limited functionality")
+            self.api_key = None # Alpha Vantage key no longer needed
 
             self.max_retries = data_sources.get("max_retry", 3)
             self.timeout = self.config.get("api", {}).get("timeout_seconds", 30)
@@ -271,20 +287,7 @@ class LiveDataFetcher:
             current_time = time.time()
             minute_ago = current_time - 60
 
-            if api_type == "alpha_vantage":
-                self.alpha_requests = [t for t in self.alpha_requests if t > minute_ago]
-
-                if len(self.alpha_requests) >= self.max_alpha_requests_per_minute:
-                    sleep_time = 60 - (current_time - self.alpha_requests[0]) + 0.5
-                    self.logger.warning(
-                        f"Alpha Vantage rate limit: sleeping {sleep_time:.1f}s"
-                    )
-                    time.sleep(sleep_time)
-                    self.alpha_requests = []
-
-                self.alpha_requests.append(current_time)
-
-            elif api_type == "binance":
+            if api_type == "binance":
                 self.binance_requests = [
                     t for t in self.binance_requests if t > minute_ago
                 ]
@@ -330,9 +333,10 @@ class LiveDataFetcher:
                     url = f"{self.BINANCE_URL}/ticker/24hr?symbol={pair}"
 
                 return url, "binance"
+                return url, "binance"
             else:
-                url = f"{self.ALPHA_VANTAGE_URL}?function=GLOBAL_QUOTE&symbol={symbol}&apikey={self.api_key}"
-                return url, "alpha_vantage"
+                # yfinance does not use a URL builder in the same way
+                return None, "yfinance"
 
         except Exception as e:
             self.logger.error(f"Error building URL for {symbol}: {str(e)}")
@@ -367,7 +371,7 @@ class LiveDataFetcher:
 
                 data = response.json()
                 
-                if not isinstance(data, dict):
+                if not isinstance(data, (dict, list)):
                     raise ValueError(f"Invalid response type: {type(data)}")
 
                 self.logger.debug(
@@ -501,6 +505,12 @@ class LiveDataFetcher:
                         log_metric("cache_hit", 1, {"symbol": symbol})
                         return cached_data
 
+            asset_type = self._get_asset_type(symbol)
+            if asset_type == AssetType.STOCK:
+                api_type = "yfinance"
+                return self.fetch_stock_data_yfinance(symbol)
+            
+            # For crypto, use Binance URL builder
             url, api_type = self._build_url(symbol)
             if not url:
                 self.logger.error(f"Failed to build URL for {symbol}")
@@ -568,7 +578,7 @@ class LiveDataFetcher:
             if api_type == "binance":
                 return self._validate_binance_response(data, symbol)
             else:
-                return self._validate_alpha_vantage_response(data, symbol)
+                return None
 
         except Exception as e:
             self.logger.error(f"Validation error for {symbol}: {str(e)}")
@@ -586,7 +596,7 @@ class LiveDataFetcher:
                 "asset_type": "crypto" if self._get_asset_type(symbol) == AssetType.CRYPTO else "stock",
                 "source_api": api_type,
                 "raw_response": data,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "price": None,
                 "volume": None,
                 "high": None,
@@ -607,22 +617,9 @@ class LiveDataFetcher:
                     "change_percent": self._safe_float(data.get("priceChangePercent")),
                     "bid": self._safe_float(data.get("bidPrice")),
                     "ask": self._safe_float(data.get("askPrice")),
-                    "trade_count": self._safe_int(data.get("count", 0)),
                 })
 
-            elif api_type == "alpha_vantage":
-                quote = data.get("Global Quote", {})
-                normalized.update({
-                    "price": self._safe_float(quote.get("05. price")),
-                    "volume": self._safe_int(quote.get("06. volume", 0)),
-                    "high": self._safe_float(quote.get("03. high")),
-                    "low": self._safe_float(quote.get("04. low")),
-                    "open": self._safe_float(quote.get("02. open")),
-                    "change": self._safe_float(quote.get("09. change")),
-                    "change_percent": self._extract_percent(quote.get("10. change percent", "")),
-                    "previous_close": self._safe_float(quote.get("08. previous close")),
-                    "trading_day": quote.get("07. latest trading day", ""),
-                })
+            return normalized
 
             if normalized["price"] is None or normalized["price"] <= 0:
                 self.logger.warning(f"Invalid price for {symbol}: {normalized['price']}")
@@ -644,63 +641,59 @@ class LiveDataFetcher:
         except Exception:
             return None
 
-    def _validate_alpha_vantage_response(
-        self, data: Dict[str, Any], symbol: str
-    ) -> Optional[Dict[str, Any]]:
-        """Validate and extract Alpha Vantage Global Quote response"""
+    def fetch_stock_data_yfinance(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Fetch stock data using yfinance"""
         try:
-            if not isinstance(data, dict):
-                return None
-
-            if "Error Message" in data:
-                self.logger.error(f"API error for {symbol}: {data['Error Message']}")
-                return None
-
-            if "Note" in data:
-                self.logger.warning(f"Rate limit note for {symbol}")
-                return None
-
-            if "Global Quote" not in data:
-                self.logger.warning(f"No Global Quote for {symbol}")
-                return None
-
-            quote = data.get("Global Quote", {})
-            if not quote or len(quote) == 0:
-                self.logger.warning(f"Empty quote for {symbol}")
-                return None
-
+            ticker = yf.Ticker(symbol)
+            # Get fast info first (often faster than .info)
+            info = ticker.fast_info
+            
+            # Fallback to .info if needed, but fast_info is preferred for price
             try:
-                price = self._safe_float(quote.get("05. price", None))
-                if price is None or price <= 0:
-                    self.logger.warning(f"Invalid price for {symbol}")
-                    return None
+                price = info.last_price
+                prev_close = info.previous_close
+                open_price = info.open
+                day_high = info.day_high
+                day_low = info.day_low
+                volume = info.last_volume
+            except:
+                # Fallback to full info
+                full_info = ticker.info
+                price = full_info.get('currentPrice') or full_info.get('regularMarketPrice')
+                prev_close = full_info.get('previousClose') or full_info.get('regularMarketPreviousClose')
+                open_price = full_info.get('open') or full_info.get('regularMarketOpen')
+                day_high = full_info.get('dayHigh') or full_info.get('regularMarketDayHigh')
+                day_low = full_info.get('dayLow') or full_info.get('regularMarketDayLow')
+                volume = full_info.get('volume') or full_info.get('regularMarketVolume')
 
-                change_pct_str = quote.get("10. change percent", "0%")
-                change_pct = self._extract_percent(change_pct_str) if isinstance(change_pct_str, str) else self._safe_float(change_pct_str)
-
-                validated = {
-                    "symbol": symbol.upper().strip(),
-                    "asset_type": "stock",
-                    "price": price,
-                    "high": self._safe_float(quote.get("03. high", None)),
-                    "low": self._safe_float(quote.get("04. low", None)),
-                    "open": self._safe_float(quote.get("02. open", None)),
-                    "volume": self._safe_float(quote.get("06. volume", 0)),
-                    "change": self._safe_float(quote.get("09. change", 0)),
-                    "change_percent": change_pct,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "source_api": "alpha_vantage",
-                }
-
-                self.logger.debug(f"Validated Alpha Vantage response for {symbol}")
-                return validated
-
-            except (ValueError, TypeError) as e:
-                self.logger.error(f"Parse error for {symbol}: {str(e)}")
+            if price is None:
+                self.logger.warning(f"No price data found for {symbol} via yfinance")
                 return None
+
+            change = price - prev_close if prev_close else 0.0
+            change_percent = (change / prev_close) * 100 if prev_close else 0.0
+
+            validated = {
+                "symbol": symbol.upper().strip(),
+                "asset_type": "stock",
+                "price": self._safe_float(price),
+                "high": self._safe_float(day_high),
+                "low": self._safe_float(day_low),
+                "open": self._safe_float(open_price),
+                "volume": self._safe_float(volume),
+                "change": self._safe_float(change),
+                "change_percent": self._safe_float(change_percent),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "source_api": "yfinance",
+            }
+            
+            self.logger.debug(f"Fetched {symbol} via yfinance: ${price:.2f}")
+            log_metric("api_request_success", 1, {"symbol": symbol, "api": "yfinance"})
+            return validated
 
         except Exception as e:
-            self.logger.error(f"Alpha Vantage validation error for {symbol}: {str(e)}")
+            self.logger.error(f"yfinance error for {symbol}: {str(e)}")
+            log_metric("api_unexpected_error", 1, {"symbol": symbol, "api": "yfinance"})
             return None
 
     def _validate_binance_response(
@@ -734,7 +727,7 @@ class LiveDataFetcher:
                     "volume": self._safe_float(data.get("volume", 0)),
                     "change": self._safe_float(data.get("priceChange", None)),
                     "change_percent": self._safe_float(data.get("priceChangePercent", None)),
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "source_api": "binance",
                 }
 
@@ -880,6 +873,7 @@ class LiveDataFetcher:
                 f"(parallel={use_parallel}, workers={max_workers})"
             )
 
+            # Fetch all in parallel (yfinance handles concurrency well)
             if use_parallel and len(symbols_to_fetch) > 1:
                 results, successful_fetches, failed_fetches = self._fetch_parallel(
                     symbols_to_fetch, max_workers

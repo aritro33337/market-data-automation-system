@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import traceback
 
 from src.utils.logger import get_logger
@@ -128,7 +128,7 @@ class MLInferenceEngine:
             
             prediction_dict = {
                 "prediction": float(prediction[0]) if hasattr(prediction, '__getitem__') else float(prediction),
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "confidence": 0.85
             }
             

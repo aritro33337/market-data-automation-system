@@ -1,4 +1,3 @@
-
 import sys
 import signal
 import json
@@ -6,11 +5,19 @@ import os
 import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 import threading
 from contextlib import contextmanager
 import traceback
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("WARNING: 'python-dotenv' not found. .env file will not be loaded.")
+    print("Make sure you have installed 'python-dotenv' in your environment.")
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.core.live_data_fetcher import LiveDataFetcher
 from src.core.aggregator import DataAggregator
@@ -212,8 +219,7 @@ class PipelineOrchestrator:
                 self.logger.error(f"Exporter not initialized [CID:{self.correlation_id}]")
                 return False
             
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            filename_prefix = f"market_data_{timestamp}"
+            filename_prefix = "market_data"
             
             # 1. Save Excel-ready JSON (legacy support + backup)
             excel_rows = processed_data.get("excel_rows")
@@ -221,7 +227,7 @@ class PipelineOrchestrator:
                 try:
                     output_dir = "data/exports/"
                     Path(output_dir).mkdir(parents=True, exist_ok=True)
-                    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                     json_filename = f"market_data_{timestamp}.json"
                     json_filepath = Path(output_dir) / json_filename
                     
@@ -237,7 +243,7 @@ class PipelineOrchestrator:
                 try:
                     ml_dir = "data/ml_ready/"
                     Path(ml_dir).mkdir(parents=True, exist_ok=True)
-                    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                     ml_filename = f"ml_ready_{timestamp}.json"
                     ml_filepath = Path(ml_dir) / ml_filename
                     
@@ -330,12 +336,18 @@ class PipelineOrchestrator:
             
             self.logger.info("=" * 60)
             self.logger.info("Market Data Automation System - ENTERPRISE MODE")
-            self.logger.info(f"Start Time: {datetime.utcnow().isoformat()}Z")
+            self.logger.info(f"Start Time: {datetime.now(timezone.utc).isoformat()}")
             self.logger.info(f"Correlation ID: {self.correlation_id}")
             self.logger.info("=" * 60)
             
             self.register_pipeline_with_scheduler()
             
+            scheduler_config = self.config.get("scheduler", {})
+            if not scheduler_config.get("enabled", True):
+                self.logger.info(f"Scheduler disabled, running pipeline once [CID:{self.correlation_id}]")
+                self.run_full_pipeline()
+                return
+
             if self.scheduler:
                 self.logger.info(f"Starting scheduler [CID:{self.correlation_id}]...")
                 self.scheduler.start()
@@ -366,7 +378,7 @@ class PipelineOrchestrator:
                     self.logger.warning(f"Error stopping scheduler [CID:{self.correlation_id}]: {str(e)}")
             
             self.logger.info("=" * 60)
-            self.logger.info(f"Shutdown Time: {datetime.utcnow().isoformat()}Z")
+            self.logger.info(f"Shutdown Time: {datetime.now(timezone.utc).isoformat()}")
             self.logger.info(f"Correlation ID: {self.correlation_id}")
             self.logger.info("System shutdown complete")
             self.logger.info("=" * 60)

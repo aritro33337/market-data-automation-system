@@ -8,7 +8,7 @@ import random
 import threading
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
-from datetime import datetime
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -138,7 +138,7 @@ class TestPipelineOrchestrator(unittest.TestCase):
                     "volume": 1000000.0,
                     "change": 5.0,
                     "change_percent": 3.4,
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 },
                 "TSLA": {
                     "price": 250.0,
@@ -148,7 +148,7 @@ class TestPipelineOrchestrator(unittest.TestCase):
                     "volume": 800000.0,
                     "change": 5.0,
                     "change_percent": 2.0,
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
             }
             

@@ -4,7 +4,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 from pathlib import Path
 from typing import Dict, Any, Optional, Union, List, Set, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import os
 import threading
@@ -487,18 +487,42 @@ class ExcelExporter:
         except (ValueError, TypeError, AttributeError) as e:
             self.logger.debug(f"Error setting row height: {str(e)}")
 
+    def _get_next_run_id(self) -> int:
+        """Get and increment the run ID from a hidden file"""
+        try:
+            run_id_file = Path(".run_id")
+            if run_id_file.exists():
+                with open(run_id_file, "r") as f:
+                    run_id = int(f.read().strip())
+                run_id += 1
+            else:
+                run_id = 1
+            
+            with open(run_id_file, "w") as f:
+                f.write(str(run_id))
+            
+            return run_id
+        except Exception as e:
+            self.logger.error(f"Error managing run ID: {str(e)}")
+            return 1
+
     def _save(self, wb: Workbook, prefix: str, max_retries: int = 3, retry_delay: float = 0.5) -> Optional[str]:
         try:
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            base_filename = f"{prefix}_{timestamp}.xlsx"
-            filepath = self.export_dir / base_filename
+            now = datetime.now()
+            date_str = now.strftime("%d-%m-%Y")
+            time_str = now.strftime("%H-%M-%S")
+            run_id = self._get_next_run_id()
+            
+            # Filename format: market_data_11-12-2025_22-30-33_1.xlsx
+            filename = f"{prefix}_{date_str}_{time_str}_{run_id}.xlsx"
+            filepath = self.export_dir / filename
             
             with self.lock:
                 for attempt in range(max_retries):
                     try:
                         wb.save(str(filepath))
                         self.logger.info(f"Excel file saved: {str(filepath)}")
-                        log_metric("excel_save_success", 1, {"filename": base_filename, "path": str(filepath)})
+                        log_metric("excel_save_success", 1, {"filename": filename, "path": str(filepath)})
                         return str(filepath)
                     
                     except (IOError, OSError, PermissionError) as e:
@@ -508,11 +532,7 @@ class ExcelExporter:
                         else:
                             raise
                 
-                fallback_filepath = self._generate_unique_filepath(prefix, timestamp)
-                wb.save(str(fallback_filepath))
-                self.logger.info(f"Excel file saved with fallback path: {str(fallback_filepath)}")
-                log_metric("excel_save_success_fallback", 1, {"filename": fallback_filepath.name, "path": str(fallback_filepath)})
-                return str(fallback_filepath)
+                return str(filepath)
 
         except IOError as e:
             self.logger.error(f"IO error saving Excel file: {str(e)}")
@@ -543,6 +563,18 @@ class ExcelExporter:
                 return None
 
             df = self._to_dataframe(data)
+            ts_col = "Timestamp" if "Timestamp" in df.columns else "timestamp"
+            
+            if ts_col in df.columns:
+                try:
+                    df['temp_dt'] = pd.to_datetime(df[ts_col])
+                    df['Date'] = df['temp_dt'].dt.strftime('%d-%m-%Y')
+                    df['Time'] = df['temp_dt'].dt.strftime('%H:%M:%S')
+                    cols = ['Date', 'Time'] + [c for c in df.columns if c not in ['Date', 'Time', ts_col, 'temp_dt']]
+                    df = df[cols]
+                except Exception as e:
+                    self.logger.warning(f"Failed to split timestamp: {e}")
+                    pass
 
             if not self._validate_dataframe(df):
                 self.logger.error("Invalid DataFrame for export")
@@ -668,7 +700,7 @@ class ExcelExporter:
                 "export_dir": str(self.export_dir),
                 "export_dir_exists": self.export_dir.exists(),
                 "export_dir_writable": os.access(str(self.export_dir), os.W_OK),
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
             self.logger.debug("Health check: OK")
             log_metric("excel_exporter_health_check", 1, health)
