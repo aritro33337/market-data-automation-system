@@ -386,10 +386,44 @@ class PipelineOrchestrator:
             self.logger.error(f"Shutdown error [CID:{self.correlation_id}]: {str(e)}")
 
 
+def parse_arguments():
+    import argparse
+    parser = argparse.ArgumentParser(description="Market Data Automation System")
+    parser.add_argument(
+        "--config", 
+        type=str, 
+        default=os.environ.get("CONFIG_PATH", "config/settings.json"),
+        help="Path to configuration file (default: config/settings.json)"
+    )
+    parser.add_argument(
+        "--run-once", 
+        action="store_true", 
+        help="Run the pipeline once and exit, ignoring scheduler settings"
+    )
+    parser.add_argument(
+        "--verbose", 
+        action="store_true", 
+        help="Enable verbose logging (DEBUG level)"
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
     try:
-        config_path = os.environ.get("CONFIG_PATH", "config/settings.json")
-        orchestrator = PipelineOrchestrator(config_path)
+        args = parse_arguments()
+        
+        # Override log level if verbose flag is set
+        if args.verbose:
+            os.environ["LOG_LEVEL"] = "DEBUG"
+            
+        orchestrator = PipelineOrchestrator(args.config)
+        
+        # If run-once flag is set, force run once and exit
+        if args.run_once:
+            orchestrator.logger.info("CLI: --run-once flag detected. Running pipeline once.")
+            success = orchestrator.run_full_pipeline()
+            return 0 if success else 1
+            
         orchestrator.start()
         return 0
     except KeyboardInterrupt:
