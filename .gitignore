@@ -33,18 +33,12 @@ logs/
 *.err
 
 
-data/*.xlsx
-data/*.xls
-data/*.csv
-data/*.json
+data/**/*.xlsx
+data/**/*.xls
+data/**/*.csv
+data/**/*.json
 
-data/temp/
-data/cache/
-data/output/
-data/exports/
-data/raw/
-data/processed/
-data/ml_ready/
+!data/**/.gitkeep
 
 
 ml/models/
