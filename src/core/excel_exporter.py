@@ -11,6 +11,7 @@ import threading
 import time
 from src.utils.logger import get_logger, log_metric, correlation_decorator
 from src.utils.config_loader import ConfigLoader
+from src.utils.run_id_manager import RunIdManager
 
 
 class CurrencySymbol(Enum):
@@ -488,30 +489,17 @@ class ExcelExporter:
             self.logger.debug(f"Error setting row height: {str(e)}")
 
     def _get_next_run_id(self) -> int:
-        """Get and increment the run ID from a hidden file"""
-        try:
-            run_id_file = Path(".run_id")
-            if run_id_file.exists():
-                with open(run_id_file, "r") as f:
-                    run_id = int(f.read().strip())
-                run_id += 1
-            else:
-                run_id = 1
-            
-            with open(run_id_file, "w") as f:
-                f.write(str(run_id))
-            
-            return run_id
-        except Exception as e:
-            self.logger.error(f"Error managing run ID: {str(e)}")
-            return 1
+        """Get the next run ID using the centralized manager"""
+        return RunIdManager().get_next_run_id(increment=True)
 
-    def _save(self, wb: Workbook, prefix: str, max_retries: int = 3, retry_delay: float = 0.5) -> Optional[str]:
+    def _save(self, wb: Workbook, prefix: str, max_retries: int = 3, retry_delay: float = 0.5, run_id: Optional[int] = None) -> Optional[str]:
         try:
             now = datetime.now()
             date_str = now.strftime("%d-%m-%Y")
             time_str = now.strftime("%H-%M-%S")
-            run_id = self._get_next_run_id()
+            
+            if run_id is None:
+                run_id = self._get_next_run_id()
             
             # Filename format: market_data_11-12-2025_22-30-33_1.xlsx
             filename = f"{prefix}_{date_str}_{time_str}_{run_id}.xlsx"
@@ -555,7 +543,7 @@ class ExcelExporter:
                 raise RuntimeError("Unable to generate unique filename after 1000 attempts")
 
     @correlation_decorator()
-    def export_to_excel(self, data: Any, filename_prefix: str = "market_data") -> Optional[str]:
+    def export_to_excel(self, data: Any, filename_prefix: str = "market_data", run_id: Optional[int] = None) -> Optional[str]:
         try:
             if data is None:
                 self.logger.warning("No data provided for export")
@@ -595,7 +583,7 @@ class ExcelExporter:
 
                 self._apply_enterprise_styling(ws, df)
 
-                filepath = self._save(wb, filename_prefix)
+                filepath = self._save(wb, filename_prefix, run_id=run_id)
 
                 if filepath:
                     log_metric(
@@ -621,7 +609,7 @@ class ExcelExporter:
             return None
 
     @correlation_decorator()
-    def export_multi_sheet(self, data_dict: Dict[str, Any], filename_prefix: str = "market_data") -> Optional[str]:
+    def export_multi_sheet(self, data_dict: Dict[str, Any], filename_prefix: str = "market_data", run_id: Optional[int] = None) -> Optional[str]:
         try:
             if not data_dict or not isinstance(data_dict, dict):
                 self.logger.warning("Invalid data_dict for multi-sheet export")
@@ -672,7 +660,7 @@ class ExcelExporter:
                     log_metric("excel_multi_sheet_no_sheets", 0, {})
                     return None
 
-                filepath = self._save(wb, filename_prefix)
+                filepath = self._save(wb, filename_prefix, run_id=run_id)
 
                 if filepath:
                     log_metric("excel_multi_sheet_success", 1, {

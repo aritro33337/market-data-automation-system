@@ -60,6 +60,12 @@
         "excel_file_prefix": "market_data_",
         "include_timestamp_in_filename": true
     },
+    "csv_export": {
+        "enabled": false,
+        "delimiter": ",",
+        "include_header": true,
+        "output_folder": "data/exports/"
+    },
     "scheduler": {
         "enabled": false,
         "interval_seconds": 30

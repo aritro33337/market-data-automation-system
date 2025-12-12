@@ -22,10 +22,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.core.live_data_fetcher import LiveDataFetcher
 from src.core.aggregator import DataAggregator
 from src.core.excel_exporter import ExcelExporter
+from src.core.csv_exporter import CsvExporter
 from src.core.scheduler import Scheduler, JobType
 from src.ml_inference.inference import MLInferenceEngine
 from src.utils.logger import get_logger
 from src.utils.config_loader import ConfigLoader
+from src.utils.run_id_manager import RunIdManager
 
 
 class PipelineOrchestrator:
@@ -36,6 +38,7 @@ class PipelineOrchestrator:
         self.fetcher = None
         self.aggregator = None
         self.exporter = None
+        self.csv_exporter = None
         self.ml_engine = None
         self.scheduler = None
         self.shutdown_event = False
@@ -101,6 +104,14 @@ class PipelineOrchestrator:
             export_dir = self.config.get("export", {}).get("excel_output_folder", "data/exports/")
             self.exporter = ExcelExporter(export_dir=export_dir)
             self.logger.info(f"ExcelExporter initialized [CID:{self.correlation_id}]")
+
+            csv_config = self.config.get("csv_export", {})
+            self.csv_exporter = CsvExporter(
+                export_dir=csv_config.get("output_folder", "data/exports/"),
+                delimiter=csv_config.get("delimiter", ","),
+                include_header=csv_config.get("include_header", True)
+            )
+            self.logger.info(f"CsvExporter initialized [CID:{self.correlation_id}]")
         except Exception as e:
             self.logger.error(f"Core modules initialization failed [CID:{self.correlation_id}]: {str(e)}")
             raise
@@ -251,14 +262,27 @@ class PipelineOrchestrator:
                 except Exception as e:
                     self.logger.error(f"Failed to save ML-ready JSON: {e}")
 
+            # Generate a single Run ID for this export cycle to keep files in sync
+            run_id = RunIdManager().get_next_run_id(increment=True)
+
             # 3. Export to Excel (.xlsx)
             data_to_export = excel_rows if excel_rows else processed_data
-            success = self.exporter.export_to_excel(data_to_export, filename_prefix)
+            success = self.exporter.export_to_excel(data_to_export, filename_prefix, run_id=run_id)
             
             if success:
                 self.logger.info(f"Data exported successfully: {success} [CID:{self.correlation_id}]")
             else:
                 self.logger.error(f"Data export failed [CID:{self.correlation_id}]")
+
+            # 4. Export to CSV (if enabled)
+            csv_config = self.config.get("csv_export", {})
+            if csv_config.get("enabled", False):
+                if self.csv_exporter:
+                    csv_success = self.csv_exporter.export(data_to_export, filename_prefix, run_id=run_id)
+                    if csv_success:
+                        self.logger.info(f"CSV exported successfully: {csv_success} [CID:{self.correlation_id}]")
+                else:
+                    self.logger.warning(f"CsvExporter not initialized, skipping CSV export [CID:{self.correlation_id}]")
 
             return bool(success)
         except Exception as e:
