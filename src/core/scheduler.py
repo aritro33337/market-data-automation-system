@@ -418,7 +418,7 @@ class SchedulerEngine:
         try:
             with self._lock:
                 if not self._running:
-                    self.logger.warning("Scheduler not running")
+                    self.logger.debug("Scheduler not running")
                     return
                 
                 self.logger.info("Stopping scheduler engine")

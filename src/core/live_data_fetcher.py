@@ -13,8 +13,6 @@ from requests.exceptions import HTTPError
 from urllib3.util.retry import Retry
 import threading
 import random
-import threading
-import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import yfinance as yf
 
@@ -65,23 +63,7 @@ class LiveDataFetcher:
         "NEAR",
     ]
 
-    CRYPTO_SYMBOLS = [
-        "BTC",
-        "ETH",
-        "BNB",
-        "SOL",
-        "XRP",
-        "ADA",
-        "DOGE",
-        "AVAX",
-        "MATIC",
-        "DOT",
-        "LINK",
-        "UNI",
-        "LTC",
-        "BCH",
-        "NEAR",
-    ]
+
 
     BINANCE_URL = "https://api.binance.com/api/v3"
 
@@ -101,7 +83,7 @@ class LiveDataFetcher:
         self.cache_timestamps = {}
         self.cache_lock = threading.RLock()
 
-        self.cache_lock = threading.RLock()
+
 
         self.binance_requests = []
         self.max_binance_requests_per_minute = 1200
@@ -333,7 +315,7 @@ class LiveDataFetcher:
                     url = f"{self.BINANCE_URL}/ticker/24hr?symbol={pair}"
 
                 return url, "binance"
-                return url, "binance"
+
             else:
                 # yfinance does not use a URL builder in the same way
                 return None, "yfinance"
@@ -618,8 +600,6 @@ class LiveDataFetcher:
                     "bid": self._safe_float(data.get("bidPrice")),
                     "ask": self._safe_float(data.get("askPrice")),
                 })
-
-            return normalized
 
             if normalized["price"] is None or normalized["price"] <= 0:
                 self.logger.warning(f"Invalid price for {symbol}: {normalized['price']}")

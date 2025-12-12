@@ -50,9 +50,7 @@ class PipelineOrchestrator:
     def _initialize_system(self, config_path: str) -> None:
         try:
             config_path = Path(config_path)
-            if not config_path.exists():
-                raise FileNotFoundError(f"Config file not found: {config_path}")
-            
+            # ConfigLoader handles file existence check and auto-creation from example
             self.config = ConfigLoader.load(str(config_path))
             if not self.config:
                 raise ValueError("Configuration loaded but empty")

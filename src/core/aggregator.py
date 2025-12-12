@@ -335,15 +335,23 @@ class DataAggregator:
 
             for kline in klines:
                 try:
+                    price = None
+                    volume = None
+                    timestamp = None
+
                     if isinstance(kline, (list, tuple)) and len(kline) >= 5:
                         price = self._safe_float(kline[4])
-                        volume = self._safe_float(kline[7])
+                        volume = self._safe_float(kline[7] if len(kline) > 7 else 0)
                         timestamp = kline[0] if len(kline) > 0 else None
+                    elif isinstance(kline, dict):
+                        price = self._safe_float(kline.get("close"))
+                        volume = self._safe_float(kline.get("quote_volume") or kline.get("volume"))
+                        timestamp = kline.get("timestamp")
 
-                        if price and price > 0:
-                            prices.append(price)
-                            volumes.append(volume)
-                            timestamps.append(timestamp)
+                    if price and price > 0:
+                        prices.append(price)
+                        volumes.append(volume)
+                        timestamps.append(timestamp)
                 except (IndexError, ValueError, TypeError):
                     continue
 
@@ -554,14 +562,22 @@ class DataAggregator:
                 volumes = []
                 
                 for kline in klines[-24:]:
-                    if isinstance(kline, (list, tuple)) and len(kline) >= 5:
-                        try:
+                    try:
+                        close_price = None
+                        kline_volume = None
+                        
+                        if isinstance(kline, (list, tuple)) and len(kline) >= 5:
                             close_price = self._safe_float(kline[4])
                             kline_volume = self._safe_float(kline[7] if len(kline) > 7 else 0)
+                        elif isinstance(kline, dict):
+                            close_price = self._safe_float(kline.get("close"))
+                            kline_volume = self._safe_float(kline.get("quote_volume") or kline.get("volume"))
+
+                        if close_price is not None:
                             prices.append(close_price)
                             volumes.append(kline_volume)
-                        except (IndexError, ValueError):
-                            continue
+                    except (IndexError, ValueError):
+                        continue
                 
                 if prices:
                     features["rolling_mean_24h"] = self._safe_float(np.mean(prices))
@@ -908,19 +924,30 @@ class DataAggregator:
             if klines and len(klines) >= 2:
                 current_price = self._safe_float(data.get("price", 0))
                 
+                def get_close(k):
+                    if isinstance(k, (list, tuple)) and len(k) > 4:
+                        return self._safe_float(k[4])
+                    elif isinstance(k, dict):
+                        return self._safe_float(k.get("close"))
+                    return 0.0
+
                 if len(klines) >= 1:
-                    prev_price = self._safe_float(klines[-2][4]) if len(klines[-2]) > 4 else current_price
+                    prev_kline = klines[-2]
+                    prev_price = get_close(prev_kline)
+                    if prev_price <= 0: prev_price = current_price
                     metrics["change_5min"] = ((current_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
                 
                 if len(klines) >= 12:
-                    prev_price_1h = self._safe_float(klines[-12][4]) if len(klines[-12]) > 4 else current_price
+                    prev_kline_1h = klines[-12]
+                    prev_price_1h = get_close(prev_kline_1h)
+                    if prev_price_1h <= 0: prev_price_1h = current_price
                     metrics["change_1hour"] = ((current_price - prev_price_1h) / prev_price_1h * 100) if prev_price_1h > 0 else 0
                 
-                prices_5 = [self._safe_float(k[4]) for k in klines[-5:] if len(k) > 4 and self._safe_float(k[4]) > 0]
+                prices_5 = [get_close(k) for k in klines[-5:] if get_close(k) > 0]
                 if len(prices_5) >= 2:
                     metrics["volatility_5min"] = self._safe_float(np.std(prices_5))
                 
-                prices_60 = [self._safe_float(k[4]) for k in klines[-60:] if len(k) > 4 and self._safe_float(k[4]) > 0]
+                prices_60 = [get_close(k) for k in klines[-60:] if get_close(k) > 0]
                 if len(prices_60) >= 2:
                     metrics["volatility_1hour"] = self._safe_float(np.std(prices_60))
             

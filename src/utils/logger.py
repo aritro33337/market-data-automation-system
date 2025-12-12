@@ -57,7 +57,7 @@ class JsonFormatter(logging.Formatter):
         self.hostname = platform.node()
 
     def format(self, record: logging.LogRecord) -> str:
-        correlation_id = getattr(record, 'correlation_id', None) or str(uuid.uuid4())[:8]
+        correlation_id = getattr(record, 'correlation_id', None) or get_correlation_id() or str(uuid.uuid4())[:8]
         record.correlation_id = correlation_id
         
         message = record.getMessage()
@@ -100,7 +100,7 @@ class EnhancedColorFormatter(logging.Formatter):
         self.use_color = config.get("logging", {}).get("use_color", True)
 
     def format(self, record: logging.LogRecord) -> str:
-        correlation_id = getattr(record, 'correlation_id', None) or str(uuid.uuid4())[:8]
+        correlation_id = getattr(record, 'correlation_id', None) or get_correlation_id() or str(uuid.uuid4())[:8]
         record.correlation_id = correlation_id
         
         record.message = PIISanitizer.sanitize(record.getMessage())
@@ -120,7 +120,7 @@ class EnterpriseFileFormatter(logging.Formatter):
             self.datefmt = '%Y-%m-%d %H:%M:%S'
 
     def format(self, record: logging.LogRecord) -> str:
-        correlation_id = getattr(record, 'correlation_id', None) or str(uuid.uuid4())[:8]
+        correlation_id = getattr(record, 'correlation_id', None) or get_correlation_id() or str(uuid.uuid4())[:8]
         record.correlation_id = correlation_id
         
         original_message = record.getMessage()
@@ -766,18 +766,8 @@ def correlation_decorator(correlation_id: Optional[str] = None):
             set_correlation_id(cid)
             
             logger = get_logger(func.__module__)
-            old_factory = logger.makeRecord
-            
-            def makeRecord_with_correlation(*args, **kwargs):
-                record = old_factory(*args, **kwargs)
-                record.correlation_id = cid
-                if hasattr(record, 'custom_fields'):
-                    record.custom_fields['correlation_id'] = cid
-                return record
-            
-            logger.makeRecord = makeRecord_with_correlation
-            start_time = time.time()
             try:
+                start_time = time.time()
                 logger.info(f"Starting {func.__name__}", extra={'correlation_id': cid})
                 result = func(*args, **kwargs)
                 duration = (time.time() - start_time) * 1000
@@ -787,7 +777,5 @@ def correlation_decorator(correlation_id: Optional[str] = None):
                 duration = (time.time() - start_time) * 1000
                 logger.error(f"Failed {func.__name__} after {duration:.2f}ms: {str(e)}", extra={'correlation_id': cid})
                 raise
-            finally:
-                logger.makeRecord = old_factory
         return wrapper
     return decorator
